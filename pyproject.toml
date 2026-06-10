@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "btc-tri-factor-bot"
+version = "1.1.0"
+description = "Terminal-based BTC/USDT tri-factor market signal bot"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "beautifulsoup4>=4.12,<5",
+    "ccxt>=4.4,<5",
+    "lxml>=5.0,<7",
+    "pandas>=2.1,<4",
+    "requests>=2.31,<3",
+    "rich>=13.7,<15",
+    "ta>=0.11,<1",
+    "vaderSentiment>=3.3.2,<4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+btc-tri-factor = "btc_trading_bot.app:main"
+
+[tool.setuptools.packages.find]
+include = ["btc_trading_bot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

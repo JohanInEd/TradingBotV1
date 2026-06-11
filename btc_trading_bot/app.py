@@ -18,6 +18,7 @@ from btc_trading_bot.exchange import (
     market_snapshot_from_ticker,
     merge_candle_update,
 )
+from btc_trading_bot.futures import build_futures_recommendation
 from btc_trading_bot.indicators import analyze_multi_timeframe
 from btc_trading_bot.models import (
     Evaluation,
@@ -64,6 +65,9 @@ class BotService:
             sentiment=sentiment,
             macro=macro,
             signal=signal,
+            futures=build_futures_recommendation(
+                signal, market, self.settings
+            ),
             evaluated_at=evaluated_at,
             next_analysis_at=next_analysis_boundary(
                 evaluated_at, self.settings.analysis_interval_hours
@@ -210,6 +214,9 @@ def run(settings: Settings, once: bool = False) -> int:
                             technical=technical,
                             live_technical=None,
                             signal=signal,
+                            futures=build_futures_recommendation(
+                                signal, evaluation.market, settings
+                            ),
                             evaluated_at=now,
                         )
                         next_analysis = next_analysis_boundary(
@@ -363,6 +370,9 @@ def _apply_news_refresh(
         sentiment=sentiment,
         macro=macro,
         signal=signal,
+        futures=build_futures_recommendation(
+            signal, current.market, settings
+        ),
         evaluated_at=updated_at,
         news_updated_at=updated_at,
     )

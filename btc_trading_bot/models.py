@@ -80,6 +80,21 @@ class SignalResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FuturesRecommendation:
+    action: str
+    side: str
+    confidence: float
+    entry_price: float | None
+    stop_loss: float | None
+    take_profit: float | None
+    quantity_btc: float
+    notional: float
+    max_loss: float
+    leverage: int
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class Evaluation:
     market: MarketSnapshot
     technical: TechnicalAnalysis
@@ -93,3 +108,4 @@ class Evaluation:
     news_updated_at: datetime | None = None
     stream_status: str = "REST"
     stream_updated_at: datetime | None = None
+    futures: FuturesRecommendation | None = None

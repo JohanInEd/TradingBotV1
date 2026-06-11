@@ -75,6 +75,8 @@ def test_independent_news_refresh_recalculates_signal() -> None:
     )
 
     assert refreshed.signal.signal == "STRONG BUY"
+    assert refreshed.futures is not None
+    assert refreshed.futures.action == "GO LONG"
     assert refreshed.news_updated_at == updated_at
 
 

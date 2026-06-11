@@ -19,7 +19,7 @@ def build_dashboard(evaluation: Evaluation) -> Layout:
     layout.split_column(
         Layout(_header(evaluation), name="header", size=4),
         Layout(name="body"),
-        Layout(_signal_panel(evaluation), name="signal", size=7),
+        Layout(_signal_panel(evaluation), name="signal", size=10),
     )
     layout["body"].split_row(
         Layout(name="left", ratio=1),
@@ -236,6 +236,7 @@ def _score_panel(evaluation: Evaluation) -> Panel:
 
 def _signal_panel(evaluation: Evaluation) -> Panel:
     signal = evaluation.signal
+    futures = evaluation.futures
     style = (
         "bold white on green"
         if signal.signal == "STRONG BUY"
@@ -252,6 +253,38 @@ def _signal_panel(evaluation: Evaluation) -> Panel:
         style="bold",
     )
     content: list[RenderableType] = [title, detail]
+    if futures is not None:
+        futures_style = (
+            "bold green"
+            if futures.side == "LONG"
+            else "bold red"
+            if futures.side == "SHORT"
+            else "bold yellow"
+        )
+        recommendation = Text(justify="center")
+        recommendation.append(
+            f"FUTURES: {futures.action}",
+            style=futures_style,
+        )
+        if futures.entry_price is not None:
+            recommendation.append(
+                f" | Ref entry {futures.entry_price:,.2f}"
+                f" | Stop {futures.stop_loss:,.2f}"
+                f" | Target {futures.take_profit:,.2f}"
+                f" | Size {futures.quantity_btc:.6f} BTC"
+                f" | Max loss ${futures.max_loss:,.2f}",
+                style="bold",
+            )
+        else:
+            recommendation.append(f" | {futures.reason}", style="dim")
+        content.append(recommendation)
+        content.append(
+            Text(
+                "Paper guidance only. Closed candles; no order is placed.",
+                style="dim",
+                justify="center",
+            )
+        )
     if evaluation.errors:
         content.append(
             Text(

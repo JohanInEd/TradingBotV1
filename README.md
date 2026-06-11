@@ -77,6 +77,15 @@ $env:BOT_EXCHANGE = "binance-usdm"
 btc-tri-factor
 ```
 
+For a persistent Windows CMD dashboard with UTF-8 output, run:
+
+```bat
+chcp 65001 >nul
+set "PYTHONUTF8=1"
+set "BOT_EXCHANGE=binance-usdm"
+.venv\Scripts\python.exe -m btc_trading_bot
+```
+
 This resolves the default `BTC/USDT` setting to CCXT's linear perpetual symbol
 `BTC/USDT:USDT` in both REST and WebSocket clients. It reads public Binance
 USD-M data and produces paper guidance; it does not submit orders.
@@ -139,11 +148,16 @@ with publishers fetched concurrently so one slow feed cannot delay every other
 source. A completed refresh immediately recalculates the signal while preserving
 the last valid news analysis during a temporary feed outage.
 
+Console output is configured to replace characters unsupported by the active
+Windows code page instead of terminating the Rich dashboard. UTF-8 CMD launch
+settings are still recommended for correctly displaying international headlines.
+
 The current test suite covers indicators, multi-timeframe scoring, confirmation
 gating, live ticker normalization, provisional candle merging, stale-stream
 fallback, independent news updates, strategy weighting, futures guidance, risk
-sizing, and news analysis. At the time this context was recorded, all 20 tests
-passed.
+sizing, news analysis, Binance USD-M market resolution, concurrent RSS fetches,
+and Windows console encoding. At the time this context was recorded, all 25
+tests passed.
 
 ## Risk Notice
 

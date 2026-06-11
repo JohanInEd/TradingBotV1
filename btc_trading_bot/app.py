@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
@@ -416,6 +417,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    _configure_console_encoding()
     args = parse_args()
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.ERROR,
@@ -425,6 +427,17 @@ def main() -> None:
     if args.exchange:
         settings = replace(settings, exchange=args.exchange)
     raise SystemExit(run(settings, once=args.once))
+
+
+def _configure_console_encoding() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 if __name__ == "__main__":

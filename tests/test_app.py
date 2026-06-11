@@ -1,6 +1,10 @@
 from datetime import datetime, timedelta, timezone
 
-from btc_trading_bot.app import _apply_news_refresh, _market_is_stale
+from btc_trading_bot.app import (
+    _apply_news_refresh,
+    _configure_console_encoding,
+    _market_is_stale,
+)
 from btc_trading_bot.config import Settings
 from btc_trading_bot.models import (
     Evaluation,
@@ -116,3 +120,18 @@ def test_market_staleness_controls_rest_fallback() -> None:
 
     assert not _market_is_stale(fresh, now, stale_seconds=15)
     assert _market_is_stale(stale, now, stale_seconds=15)
+
+
+def test_console_encoding_replaces_unsupported_characters(monkeypatch) -> None:
+    configured: list[str] = []
+
+    class Stream:
+        def reconfigure(self, *, errors: str) -> None:
+            configured.append(errors)
+
+    monkeypatch.setattr("btc_trading_bot.app.sys.stdout", Stream())
+    monkeypatch.setattr("btc_trading_bot.app.sys.stderr", Stream())
+
+    _configure_console_encoding()
+
+    assert configured == ["replace", "replace"]

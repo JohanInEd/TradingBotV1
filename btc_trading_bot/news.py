@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -46,7 +47,6 @@ class NewsError(RuntimeError):
 class NewsAnalyzer:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.session = _build_session(settings)
         self.analyzer = SentimentIntensityAnalyzer()
         self.analyzer.lexicon.update(
             {
@@ -75,11 +75,21 @@ class NewsAnalyzer:
     def fetch(self) -> tuple[tuple[Headline, ...], tuple[str, ...]]:
         headlines: list[Headline] = []
         errors: list[str] = []
-        for feed in self.settings.feeds:
-            try:
-                headlines.extend(self._fetch_feed(feed))
-            except (requests.RequestException, ValueError) as exc:
-                errors.append(f"{feed.name}: {exc}")
+        worker_count = min(6, max(1, len(self.settings.feeds)))
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="rss-feed",
+        ) as executor:
+            futures = {
+                executor.submit(self._fetch_feed, feed): feed
+                for feed in self.settings.feeds
+            }
+            for future in as_completed(futures):
+                feed = futures[future]
+                try:
+                    headlines.extend(future.result())
+                except (requests.RequestException, ValueError) as exc:
+                    errors.append(f"{feed.name}: {exc}")
 
         deduplicated = _deduplicate(headlines)
         if not deduplicated:
@@ -87,16 +97,22 @@ class NewsAnalyzer:
         return tuple(deduplicated), tuple(errors)
 
     def _fetch_feed(self, feed: NewsFeed) -> list[Headline]:
-        response = self.session.get(
-            feed.url,
-            timeout=self.settings.request_timeout_seconds,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (compatible; BTC-Tri-Factor-Bot/1.0; "
-                    "+https://github.com/)"
-                )
-            },
-        )
+        session = _build_session(self.settings)
+        try:
+            response = session.get(
+                feed.url,
+                timeout=self.settings.request_timeout_seconds,
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Pragma": "no-cache",
+                    "User-Agent": (
+                        "Mozilla/5.0 (compatible; BTC-Tri-Factor-Bot/1.0; "
+                        "+https://github.com/)"
+                    ),
+                },
+            )
+        finally:
+            session.close()
         response.raise_for_status()
         soup = BeautifulSoup(response.content, "xml")
         entries = soup.find_all(["item", "entry"])
@@ -200,7 +216,7 @@ class NewsAnalyzer:
         )
 
     def close(self) -> None:
-        self.session.close()
+        pass
 
 
 def neutral_sentiment() -> SentimentAnalysis:

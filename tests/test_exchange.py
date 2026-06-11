@@ -7,6 +7,7 @@ from btc_trading_bot.exchange import (
     ExchangeClient,
     market_snapshot_from_ticker,
     merge_candle_update,
+    resolve_exchange_spec,
 )
 
 
@@ -109,3 +110,28 @@ def test_live_candle_replaces_current_row_then_appends_next_row() -> None:
     assert replaced.iloc[-1]["close"] == 104.0
     assert len(appended) == 2
     assert appended.iloc[-1]["close"] == 107.0
+
+
+def test_binance_usdm_uses_linear_perpetual_market() -> None:
+    spec = resolve_exchange_spec("binance-usdm", "BTC/USDT")
+
+    assert spec.ccxt_id == "binanceusdm"
+    assert spec.symbol == "BTC/USDT:USDT"
+    assert spec.options == {"defaultType": "future"}
+
+
+def test_binance_usdm_preserves_explicit_settlement_symbol() -> None:
+    spec = resolve_exchange_spec("binance-usdm", "ETH/USDT:USDT")
+
+    assert spec.symbol == "ETH/USDT:USDT"
+
+
+def test_exchange_name_is_safe_for_legacy_windows_console() -> None:
+    client = ExchangeClient.__new__(ExchangeClient)
+    client.exchange = type(
+        "Exchange",
+        (),
+        {"name": "Binance USD\u24c8-M"},
+    )()
+
+    assert client.name == "Binance USD-M"

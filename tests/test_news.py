@@ -1,6 +1,7 @@
+import threading
 from datetime import datetime, timezone
 
-from btc_trading_bot.config import Settings
+from btc_trading_bot.config import NewsFeed, Settings
 from btc_trading_bot.models import Headline
 from btc_trading_bot.news import NewsAnalyzer
 
@@ -45,3 +46,23 @@ def test_negative_macro_event_applies_defensive_multiplier() -> None:
     assert result.status in {"ELEVATED RISK", "HIGH RISK"}
     assert result.risk_multiplier < 1.0
     assert result.alerts
+
+
+def test_feed_requests_run_concurrently(monkeypatch) -> None:
+    feeds = (
+        NewsFeed("First", "https://example.com/first", "crypto"),
+        NewsFeed("Second", "https://example.com/second", "crypto"),
+    )
+    analyzer = NewsAnalyzer(Settings(feeds=feeds))
+    barrier = threading.Barrier(2, timeout=1)
+
+    def fetch_feed(feed: NewsFeed) -> list[Headline]:
+        barrier.wait()
+        return [_headline(f"Bitcoin update from {feed.name}")]
+
+    monkeypatch.setattr(analyzer, "_fetch_feed", fetch_feed)
+
+    headlines, errors = analyzer.fetch()
+
+    assert len(headlines) == 2
+    assert errors == ()

@@ -26,9 +26,18 @@ class StreamEvent:
 
 
 class RealtimeMarketStream:
-    def __init__(self, settings: Settings, exchange_id: str) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        exchange_id: str,
+        *,
+        symbol: str | None = None,
+        exchange_options: dict[str, str] | None = None,
+    ) -> None:
         self.settings = settings
         self.exchange_id = exchange_id
+        self.symbol = symbol or settings.symbol
+        self.exchange_options = exchange_options or {"defaultType": "spot"}
         self.events: queue.Queue[StreamEvent] = queue.Queue(maxsize=500)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -91,7 +100,7 @@ class RealtimeMarketStream:
             {
                 "enableRateLimit": True,
                 "timeout": int(self.settings.request_timeout_seconds * 1000),
-                "options": {"defaultType": "spot"},
+                "options": self.exchange_options,
                 "session": session,
             }
         )
@@ -128,7 +137,7 @@ class RealtimeMarketStream:
             return
         while not self._stop.is_set():
             try:
-                ticker = await exchange.watch_ticker(self.settings.symbol)
+                ticker = await exchange.watch_ticker(self.symbol)
                 self._publish(
                     StreamEvent(
                         kind="ticker",
@@ -149,7 +158,7 @@ class RealtimeMarketStream:
         while not self._stop.is_set():
             try:
                 rows = await exchange.watch_ohlcv(
-                    self.settings.symbol,
+                    self.symbol,
                     timeframe=timeframe,
                     limit=self.settings.candle_limit,
                 )

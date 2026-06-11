@@ -170,11 +170,18 @@ def run(settings: Settings, once: bool = False) -> int:
         return 1
 
     if once:
-        console.print(build_static_report(evaluation))
-        service.close()
+        try:
+            console.print(build_static_report(evaluation))
+        finally:
+            service.close()
         return 0
 
-    stream = RealtimeMarketStream(settings, service.exchange.id)
+    stream = RealtimeMarketStream(
+        settings,
+        service.exchange.id,
+        symbol=service.exchange.symbol,
+        exchange_options=service.exchange.options,
+    )
     stream.start()
     news_executor = ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="btc-news"
@@ -310,7 +317,7 @@ def _apply_stream_events(
                 market = market_snapshot_from_ticker(
                     event.payload,
                     exchange=service.exchange.name,
-                    symbol=service.settings.symbol,
+                    symbol=service.exchange.symbol,
                     source="WebSocket",
                 )
                 current = replace(
@@ -392,7 +399,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--exchange",
-        choices=("auto", "kraken", "binance"),
+        choices=("auto", "kraken", "binance", "binance-usdm"),
         help="Exchange to use (default: BOT_EXCHANGE or auto)",
     )
     parser.add_argument(

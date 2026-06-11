@@ -7,8 +7,8 @@ filter. Confirmed signals are also translated into paper futures guidance:
 
 The program is intentionally **signal-only**. It does not request exchange API
 keys and cannot place orders. Futures entry, stop, target, size, and maximum
-loss values are paper estimates for strategy validation. They currently use
-the spot BTC/USDT price as a reference, not a perpetual-contract quote.
+loss values are paper estimates for strategy validation. Binance USD-M mode
+uses the public perpetual-contract quote as its reference.
 
 ## Strategy
 
@@ -64,27 +64,29 @@ Select an exchange explicitly:
 ```powershell
 btc-tri-factor --exchange kraken
 btc-tri-factor --exchange binance
+btc-tri-factor --exchange binance-usdm
 ```
 
 With `auto`, Kraken is attempted first and Binance second. No credentials are
 needed because only public market endpoints are used.
 
-For Binance market data, run:
+For Binance USD-M perpetual market data, run:
 
 ```powershell
-$env:BOT_EXCHANGE = "binance"
+$env:BOT_EXCHANGE = "binance-usdm"
 btc-tri-factor
 ```
 
-The current implementation reads Binance spot BTC/USDT data and produces paper
-futures guidance. It does not connect to Binance USD-M Futures or submit orders.
+This resolves the default `BTC/USDT` setting to CCXT's linear perpetual symbol
+`BTC/USDT:USDT` in both REST and WebSocket clients. It reads public Binance
+USD-M data and produces paper guidance; it does not submit orders.
 
 ## Configuration
 
 | Environment variable | Default | Description |
 | --- | ---: | --- |
-| `BOT_EXCHANGE` | `auto` | `auto`, `kraken`, or `binance` |
-| `BOT_SYMBOL` | `BTC/USDT` | CCXT spot symbol |
+| `BOT_EXCHANGE` | `auto` | `auto`, `kraken`, `binance`, or `binance-usdm` |
+| `BOT_SYMBOL` | `BTC/USDT` | CCXT symbol; USD-M mode adds `:USDT` when omitted |
 | `BOT_MARKET_REFRESH_SECONDS` | `60` | REST ticker fallback interval |
 | `BOT_NEWS_REFRESH_SECONDS` | `600` | Independent RSS refresh, minimum 60 |
 | `BOT_STREAM_STALE_SECONDS` | `15` | Age before REST ticker fallback |
@@ -132,9 +134,10 @@ completed candles.
 The dashboard receives live ticker and provisional `4h`, `1d`, and `1h` candle
 updates through WebSockets. Provisional calculations are informational and do
 not replace the closed-candle signal. If the ticker stream becomes stale, the
-existing REST client resumes polling. RSS news refreshes in a dedicated worker
-and immediately recalculates the signal while preserving the last valid news
-analysis during a temporary feed outage.
+existing REST client resumes polling. RSS news refreshes in a dedicated worker,
+with publishers fetched concurrently so one slow feed cannot delay every other
+source. A completed refresh immediately recalculates the signal while preserving
+the last valid news analysis during a temporary feed outage.
 
 The current test suite covers indicators, multi-timeframe scoring, confirmation
 gating, live ticker normalization, provisional candle merging, stale-stream

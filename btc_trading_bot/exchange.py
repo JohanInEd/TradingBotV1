@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -18,19 +19,52 @@ class MarketDataError(RuntimeError):
     """Raised when usable market data cannot be obtained."""
 
 
+@dataclass(frozen=True, slots=True)
+class ExchangeSpec:
+    ccxt_id: str
+    symbol: str
+    options: dict[str, str]
+
+
+def resolve_exchange_spec(exchange_id: str, symbol: str) -> ExchangeSpec:
+    if exchange_id in {"binance-usdm", "binanceusdm"}:
+        return ExchangeSpec(
+            ccxt_id="binanceusdm",
+            symbol=_usdm_symbol(symbol),
+            options={"defaultType": "future"},
+        )
+    return ExchangeSpec(
+        ccxt_id=exchange_id,
+        symbol=symbol,
+        options={"defaultType": "spot"},
+    )
+
+
 class ExchangeClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.exchange: ccxt.Exchange
+        self.spec: ExchangeSpec
         self.exchange = self._connect()
 
     @property
     def name(self) -> str:
-        return self.exchange.name
+        return self.exchange.name.replace("USD\u24c8-M", "USD-M")
 
     @property
     def id(self) -> str:
-        return self.exchange.id
+        spec = getattr(self, "spec", None)
+        return spec.ccxt_id if spec is not None else self.exchange.id
+
+    @property
+    def symbol(self) -> str:
+        spec = getattr(self, "spec", None)
+        return spec.symbol if spec is not None else self.settings.symbol
+
+    @property
+    def options(self) -> dict[str, str]:
+        spec = getattr(self, "spec", None)
+        return dict(spec.options) if spec is not None else {"defaultType": "spot"}
 
     def _candidate_ids(self) -> tuple[str, ...]:
         if self.settings.exchange == "auto":
@@ -40,23 +74,25 @@ class ExchangeClient:
     def _connect(self) -> ccxt.Exchange:
         failures: list[str] = []
         for exchange_id in self._candidate_ids():
-            exchange_class = getattr(ccxt, exchange_id, None)
+            spec = resolve_exchange_spec(exchange_id, self.settings.symbol)
+            exchange_class = getattr(ccxt, spec.ccxt_id, None)
             if exchange_class is None:
-                failures.append(f"{exchange_id}: unsupported CCXT exchange")
+                failures.append(f"{spec.ccxt_id}: unsupported CCXT exchange")
                 continue
             exchange = exchange_class(
                 {
                     "enableRateLimit": True,
                     "timeout": int(self.settings.request_timeout_seconds * 1000),
-                    "options": {"defaultType": "spot"},
+                    "options": spec.options,
                 }
             )
             try:
                 self._retry(exchange.load_markets)
-                if self.settings.symbol not in exchange.markets:
-                    raise MarketDataError(f"{self.settings.symbol} is not listed")
+                if spec.symbol not in exchange.markets:
+                    raise MarketDataError(f"{spec.symbol} is not listed")
                 if not exchange.has.get("fetchOHLCV"):
                     raise MarketDataError("OHLCV is not supported")
+                self.spec = spec
                 LOGGER.info("Connected to %s", exchange.name)
                 return exchange
             except Exception as exc:
@@ -84,12 +120,12 @@ class ExchangeClient:
     def fetch_market_snapshot(self) -> MarketSnapshot:
         try:
             ticker = self._retry(
-                lambda: self.exchange.fetch_ticker(self.settings.symbol)
+                lambda: self.exchange.fetch_ticker(self.symbol)
             )
             return market_snapshot_from_ticker(
                 ticker,
                 exchange=self.name,
-                symbol=self.settings.symbol,
+                symbol=self.symbol,
                 source="REST",
             )
         except (ccxt.BaseError, ValueError, TypeError) as exc:
@@ -100,7 +136,7 @@ class ExchangeClient:
         try:
             rows = self._retry(
                 lambda: self.exchange.fetch_ohlcv(
-                    self.settings.symbol,
+                    self.symbol,
                     timeframe=timeframe,
                     limit=self.settings.candle_limit,
                 )
@@ -158,6 +194,15 @@ def _number(value: Any) -> float | None:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _usdm_symbol(symbol: str) -> str:
+    if ":" in symbol:
+        return symbol
+    if "/" not in symbol:
+        return symbol
+    base, quote = symbol.split("/", maxsplit=1)
+    return f"{base}/{quote}:{quote}"
 
 
 def market_snapshot_from_ticker(

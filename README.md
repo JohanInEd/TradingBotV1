@@ -37,6 +37,11 @@ WebSocket candle updates. Ticker price, bid, ask, and 24-hour change stream in
 real time, with REST polling retained as a stale-stream fallback. News and
 macro analysis refresh independently every ten minutes.
 
+In Binance USD-M mode, the dashboard also displays public derivatives context:
+mark and index price, perpetual basis, funding rate and countdown, open
+interest, and the global long/short account ratio. These metrics are currently
+confirmation context and do not alter the established 40/30/30 signal weights.
+
 ## Install
 
 Python 3.10 or newer is required.
@@ -96,7 +101,7 @@ USD-M data and produces paper guidance; it does not submit orders.
 | --- | ---: | --- |
 | `BOT_EXCHANGE` | `auto` | `auto`, `kraken`, `binance`, or `binance-usdm` |
 | `BOT_SYMBOL` | `BTC/USDT` | CCXT symbol; USD-M mode adds `:USDT` when omitted |
-| `BOT_MARKET_REFRESH_SECONDS` | `60` | REST ticker fallback interval |
+| `BOT_MARKET_REFRESH_SECONDS` | `60` | REST fallback and futures-metrics interval |
 | `BOT_NEWS_REFRESH_SECONDS` | `600` | Independent RSS refresh, minimum 60 |
 | `BOT_STREAM_STALE_SECONDS` | `15` | Age before REST ticker fallback |
 | `BOT_ANALYSIS_INTERVAL_HOURS` | `4` | Analysis boundary interval |
@@ -148,6 +153,11 @@ with publishers fetched concurrently so one slow feed cannot delay every other
 source. A completed refresh immediately recalculates the signal while preserving
 the last valid news analysis during a temporary feed outage.
 
+The header reports independent Market, Futures, and News refresh health. Each
+source shows its current state, age of the last successful update, and next
+scheduled refresh. Failed refreshes preserve the last valid data and change the
+health state to `DEGRADED`, `FAILED`, or `RECONNECTING`.
+
 Console output is configured to replace characters unsupported by the active
 Windows code page instead of terminating the Rich dashboard. UTF-8 CMD launch
 settings are still recommended for correctly displaying international headlines.
@@ -156,8 +166,8 @@ The current test suite covers indicators, multi-timeframe scoring, confirmation
 gating, live ticker normalization, provisional candle merging, stale-stream
 fallback, independent news updates, strategy weighting, futures guidance, risk
 sizing, news analysis, Binance USD-M market resolution, concurrent RSS fetches,
-and Windows console encoding. At the time this context was recorded, all 25
-tests passed.
+futures-specific indicators, refresh-health transitions, and Windows console
+encoding. At the time this context was recorded, all 28 tests passed.
 
 ## Risk Notice
 

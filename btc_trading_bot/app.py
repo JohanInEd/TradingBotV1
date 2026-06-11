@@ -23,8 +23,10 @@ from btc_trading_bot.futures import build_futures_recommendation
 from btc_trading_bot.indicators import analyze_multi_timeframe
 from btc_trading_bot.models import (
     Evaluation,
+    FuturesMetrics,
     MacroAnalysis,
     MarketSnapshot,
+    RefreshHealth,
     SentimentAnalysis,
     TechnicalAnalysis,
 )
@@ -54,10 +56,13 @@ class BotService:
 
         sentiment, macro, news_errors = self.refresh_news()
         errors.extend(news_errors)
+        news_succeeded = sentiment is not None and macro is not None
         if sentiment is None or macro is None:
             sentiment = neutral_sentiment()
             macro = neutral_macro()
 
+        futures_metrics, futures_errors = self.refresh_futures_metrics()
+        errors.extend(futures_errors)
         signal = calculate_signal(technical, sentiment, macro, self.settings)
         evaluated_at = datetime.now(timezone.utc)
         return Evaluation(
@@ -74,7 +79,25 @@ class BotService:
                 evaluated_at, self.settings.analysis_interval_hours
             ),
             errors=tuple(errors),
-            news_updated_at=evaluated_at,
+            news_updated_at=evaluated_at if news_succeeded else None,
+            futures_metrics=futures_metrics,
+            market_health=RefreshHealth(
+                status="OK",
+                last_success_at=market.timestamp,
+                last_attempt_at=evaluated_at,
+            ),
+            futures_health=_initial_futures_health(
+                self.exchange.id,
+                futures_metrics,
+                futures_errors,
+                evaluated_at,
+            ),
+            news_health=_completed_health(
+                RefreshHealth(),
+                succeeded=news_succeeded,
+                errors=news_errors,
+                attempted_at=evaluated_at,
+            ),
         )
 
     def refresh_technicals(self) -> TechnicalAnalysis:
@@ -135,6 +158,11 @@ class BotService:
     def refresh_market(self) -> MarketSnapshot:
         return self.exchange.fetch_market_snapshot()
 
+    def refresh_futures_metrics(
+        self,
+    ) -> tuple[FuturesMetrics | None, tuple[str, ...]]:
+        return self.exchange.fetch_futures_metrics()
+
     def close(self) -> None:
         self.news.close()
         self.exchange.close()
@@ -190,10 +218,32 @@ def run(settings: Settings, once: bool = False) -> int:
     next_market_refresh = datetime.now(timezone.utc) + timedelta(
         seconds=settings.market_refresh_seconds
     )
+    next_futures_refresh = datetime.now(timezone.utc) + timedelta(
+        seconds=settings.market_refresh_seconds
+    )
     next_news_refresh = datetime.now(timezone.utc) + timedelta(
         seconds=settings.news_refresh_seconds
     )
     next_analysis = evaluation.next_analysis_at
+    evaluation = replace(
+        evaluation,
+        market_health=replace(
+            evaluation.market_health,
+            next_refresh_at=next_market_refresh,
+        ),
+        futures_health=replace(
+            evaluation.futures_health,
+            next_refresh_at=(
+                next_futures_refresh
+                if service.exchange.id == "binanceusdm"
+                else None
+            ),
+        ),
+        news_health=replace(
+            evaluation.news_health,
+            next_refresh_at=next_news_refresh,
+        ),
+    )
 
     try:
         with Live(
@@ -241,6 +291,16 @@ def run(settings: Settings, once: bool = False) -> int:
                     next_news_refresh = now + timedelta(
                         seconds=settings.news_refresh_seconds
                     )
+                    evaluation = replace(
+                        evaluation,
+                        news_health=replace(
+                            evaluation.news_health,
+                            status="REFRESHING",
+                            last_attempt_at=now,
+                            next_refresh_at=next_news_refresh,
+                            detail=None,
+                        ),
+                    )
                 if news_future is not None and news_future.done():
                     try:
                         sentiment, macro, errors = news_future.result()
@@ -278,16 +338,91 @@ def run(settings: Settings, once: bool = False) -> int:
                                 evaluation,
                                 market=market,
                                 stream_status="REST fallback",
+                                market_health=RefreshHealth(
+                                    status="REST",
+                                    last_success_at=market.timestamp,
+                                    last_attempt_at=now,
+                                    next_refresh_at=next_market_refresh,
+                                ),
                             )
                         except Exception as exc:
                             evaluation = _with_error(
                                 evaluation, f"Price refresh failed: {exc}"
                             )
+                            evaluation = replace(
+                                evaluation,
+                                market_health=replace(
+                                    evaluation.market_health,
+                                    status="FAILED",
+                                    last_attempt_at=now,
+                                    detail=str(exc),
+                                ),
+                            )
+
                     next_market_refresh = now + timedelta(
                         seconds=settings.market_refresh_seconds
                     )
 
-                evaluation = replace(evaluation, next_analysis_at=next_analysis)
+                if (
+                    service.exchange.id == "binanceusdm"
+                    and now >= next_futures_refresh
+                ):
+                    try:
+                        metrics, errors = service.refresh_futures_metrics()
+                        for error in errors:
+                            evaluation = _with_error(evaluation, error)
+                        evaluation = replace(
+                            evaluation,
+                            futures_metrics=(
+                                metrics
+                                if metrics is not None
+                                else evaluation.futures_metrics
+                            ),
+                            futures_health=_completed_health(
+                                evaluation.futures_health,
+                                succeeded=metrics is not None,
+                                errors=errors,
+                                attempted_at=now,
+                            ),
+                        )
+                    except Exception as exc:
+                        evaluation = _with_error(
+                            evaluation,
+                            f"Futures metrics refresh failed: {exc}",
+                        )
+                        evaluation = replace(
+                            evaluation,
+                            futures_health=replace(
+                                evaluation.futures_health,
+                                status="FAILED",
+                                last_attempt_at=now,
+                                detail=str(exc),
+                            ),
+                        )
+                    next_futures_refresh = now + timedelta(
+                        seconds=settings.market_refresh_seconds
+                    )
+
+                evaluation = replace(
+                    evaluation,
+                    next_analysis_at=next_analysis,
+                    market_health=replace(
+                        evaluation.market_health,
+                        next_refresh_at=next_market_refresh,
+                    ),
+                    futures_health=replace(
+                        evaluation.futures_health,
+                        next_refresh_at=(
+                            next_futures_refresh
+                            if service.exchange.id == "binanceusdm"
+                            else None
+                        ),
+                    ),
+                    news_health=replace(
+                        evaluation.news_health,
+                        next_refresh_at=next_news_refresh,
+                    ),
+                )
                 live.update(build_dashboard(evaluation))
                 time.sleep(0.25)
     except KeyboardInterrupt:
@@ -326,6 +461,12 @@ def _apply_stream_events(
                     market=market,
                     stream_status="LIVE",
                     stream_updated_at=event.received_at,
+                    market_health=replace(
+                        current.market_health,
+                        status="LIVE",
+                        last_success_at=event.received_at,
+                        detail=None,
+                    ),
                 )
             except Exception as exc:
                 current = _with_error(
@@ -349,10 +490,28 @@ def _apply_stream_events(
                 )
         elif event.kind == "status" and event.message:
             if event.message == "LIVE":
-                current = replace(current, stream_status="LIVE")
+                current = replace(
+                    current,
+                    stream_status="LIVE",
+                    market_health=replace(
+                        current.market_health,
+                        status="LIVE",
+                        last_success_at=event.received_at,
+                        detail=None,
+                    ),
+                )
             else:
                 current = _with_error(current, event.message)
-                current = replace(current, stream_status="RECONNECTING")
+                current = replace(
+                    current,
+                    stream_status="RECONNECTING",
+                    market_health=replace(
+                        current.market_health,
+                        status="RECONNECTING",
+                        last_attempt_at=event.received_at,
+                        detail=event.message,
+                    ),
+                )
     return current
 
 
@@ -368,7 +527,15 @@ def _apply_news_refresh(
     for error in errors:
         current = _with_error(current, error)
     if sentiment is None or macro is None:
-        return current
+        return replace(
+            current,
+            news_health=_completed_health(
+                current.news_health,
+                succeeded=False,
+                errors=errors,
+                attempted_at=updated_at,
+            ),
+        )
 
     signal = calculate_signal(
         current.technical, sentiment, macro, settings
@@ -383,6 +550,45 @@ def _apply_news_refresh(
         ),
         evaluated_at=updated_at,
         news_updated_at=updated_at,
+        news_health=_completed_health(
+            current.news_health,
+            succeeded=True,
+            errors=errors,
+            attempted_at=updated_at,
+        ),
+    )
+
+
+def _initial_futures_health(
+    exchange_id: str,
+    metrics: FuturesMetrics | None,
+    errors: tuple[str, ...],
+    attempted_at: datetime,
+) -> RefreshHealth:
+    if exchange_id != "binanceusdm":
+        return RefreshHealth(status="N/A")
+    return _completed_health(
+        RefreshHealth(),
+        succeeded=metrics is not None,
+        errors=errors,
+        attempted_at=attempted_at,
+    )
+
+
+def _completed_health(
+    previous: RefreshHealth,
+    *,
+    succeeded: bool,
+    errors: tuple[str, ...],
+    attempted_at: datetime,
+) -> RefreshHealth:
+    status = "OK" if succeeded and not errors else "DEGRADED" if succeeded else "FAILED"
+    return replace(
+        previous,
+        status=status,
+        last_success_at=attempted_at if succeeded else previous.last_success_at,
+        last_attempt_at=attempted_at,
+        detail="; ".join(errors[:2]) if errors else None,
     )
 
 

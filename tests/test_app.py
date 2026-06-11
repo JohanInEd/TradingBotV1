@@ -82,6 +82,8 @@ def test_independent_news_refresh_recalculates_signal() -> None:
     assert refreshed.futures is not None
     assert refreshed.futures.action == "GO LONG"
     assert refreshed.news_updated_at == updated_at
+    assert refreshed.news_health.status == "OK"
+    assert refreshed.news_health.last_success_at == updated_at
 
 
 def test_failed_news_refresh_preserves_last_analysis() -> None:
@@ -99,6 +101,7 @@ def test_failed_news_refresh_preserves_last_analysis() -> None:
     assert refreshed.sentiment == evaluation.sentiment
     assert refreshed.macro == evaluation.macro
     assert "Feeds unavailable" in refreshed.errors
+    assert refreshed.news_health.status == "FAILED"
 
 
 def test_market_staleness_controls_rest_fallback() -> None:

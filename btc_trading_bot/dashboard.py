@@ -11,13 +11,13 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from btc_trading_bot.models import Evaluation, Headline
+from btc_trading_bot.models import Evaluation, Headline, RefreshHealth
 
 
 def build_dashboard(evaluation: Evaluation) -> Layout:
     layout = Layout()
     layout.split_column(
-        Layout(_header(evaluation), name="header", size=4),
+        Layout(_header(evaluation), name="header", size=6),
         Layout(name="body"),
         Layout(_signal_panel(evaluation), name="signal", size=10),
     )
@@ -74,6 +74,11 @@ def _header(evaluation: Evaluation) -> Panel:
     line.append(f"{market.exchange}   ", style="dim")
     line.append(evaluation.stream_status, style=stream_style)
     line.append(f" via {market.source}", style="dim")
+    if evaluation.futures_metrics is not None:
+        line.append("\n")
+        line.append_text(_futures_metrics_line(evaluation))
+    line.append("\n")
+    line.append_text(_refresh_health_line(evaluation))
     return Panel(
         Align.center(line),
         title="[bold]BTC TRI-FACTOR SIGNAL ENGINE[/bold]",
@@ -355,3 +360,87 @@ def _updated_suffix(value: datetime | None) -> str:
     if value is None:
         return ""
     return f" [dim](updated {_format_age(value)})[/dim]"
+
+
+def _futures_metrics_line(evaluation: Evaluation) -> Text:
+    metrics = evaluation.futures_metrics
+    line = Text("USD-M  ", style="bold cyan")
+    if metrics is None:
+        line.append("metrics unavailable", style="dim")
+        return line
+
+    if metrics.mark_price is not None:
+        line.append(f"Mark {metrics.mark_price:,.2f}")
+    if metrics.index_price is not None:
+        line.append(f"  Index {metrics.index_price:,.2f}")
+    if metrics.mark_price is not None and metrics.index_price not in (None, 0):
+        basis = (
+            (metrics.mark_price - metrics.index_price)
+            / metrics.index_price
+            * 100
+        )
+        line.append(f"  Basis {basis:+.3f}%", style=_score_style(basis))
+    if metrics.funding_rate is not None:
+        funding_percent = metrics.funding_rate * 100
+        line.append(
+            f"  Funding {funding_percent:+.4f}%",
+            style=_score_style(-funding_percent),
+        )
+        if metrics.next_funding_at is not None:
+            line.append(f" in {_countdown(metrics.next_funding_at)}", style="dim")
+    if metrics.open_interest_amount is not None:
+        line.append(f"  OI {metrics.open_interest_amount:,.0f} BTC")
+    if metrics.open_interest_value is not None:
+        line.append(f" ({_compact_usd(metrics.open_interest_value)})", style="dim")
+    if metrics.long_short_ratio is not None:
+        line.append(f"  L/S {metrics.long_short_ratio:.2f}")
+    return line
+
+
+def _refresh_health_line(evaluation: Evaluation) -> Text:
+    line = Text("Health  ", style="bold")
+    for index, (label, health) in enumerate(
+        (
+            ("Market", evaluation.market_health),
+            ("Futures", evaluation.futures_health),
+            ("News", evaluation.news_health),
+        )
+    ):
+        if index:
+            line.append("  |  ", style="dim")
+        line.append(f"{label} ")
+        line.append(health.status, style=_health_style(health.status))
+        if health.last_success_at is not None:
+            line.append(f" {_health_age(health.last_success_at)}", style="dim")
+        if health.next_refresh_at is not None:
+            line.append(f" next {_countdown(health.next_refresh_at)}", style="dim")
+    return line
+
+
+def _health_style(status: str) -> str:
+    if status in {"OK", "LIVE", "REST"}:
+        return "bold green"
+    if status in {"FAILED", "RECONNECTING"}:
+        return "bold red"
+    if status in {"DEGRADED", "REFRESHING"}:
+        return "bold yellow"
+    return "dim"
+
+
+def _health_age(value: datetime) -> str:
+    seconds = max(0, int((datetime.now(timezone.utc) - value).total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h"
+
+
+def _compact_usd(value: float) -> str:
+    if abs(value) >= 1_000_000_000:
+        return f"${value / 1_000_000_000:.2f}B"
+    if abs(value) >= 1_000_000:
+        return f"${value / 1_000_000:.2f}M"
+    if abs(value) >= 1_000:
+        return f"${value / 1_000:.2f}K"
+    return f"${value:,.2f}"

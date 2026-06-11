@@ -10,7 +10,7 @@ import ccxt
 import pandas as pd
 
 from btc_trading_bot.config import Settings
-from btc_trading_bot.models import MarketSnapshot
+from btc_trading_bot.models import FuturesMetrics, MarketSnapshot
 
 LOGGER = logging.getLogger(__name__)
 
@@ -131,6 +131,61 @@ class ExchangeClient:
         except (ccxt.BaseError, ValueError, TypeError) as exc:
             raise MarketDataError(f"Ticker request failed: {exc}") from exc
 
+    def fetch_futures_metrics(
+        self,
+    ) -> tuple[FuturesMetrics | None, tuple[str, ...]]:
+        if self.id != "binanceusdm":
+            return None, ()
+
+        errors: list[str] = []
+        funding: dict[str, Any] = {}
+        open_interest: dict[str, Any] = {}
+        ratios: list[dict[str, Any]] = []
+        requests = (
+            (
+                "funding rate",
+                lambda: self.exchange.fetch_funding_rate(self.symbol),
+            ),
+            (
+                "open interest",
+                lambda: self.exchange.fetch_open_interest(self.symbol),
+            ),
+            (
+                "long/short ratio",
+                lambda: self.exchange.fetch_long_short_ratio_history(
+                    self.symbol,
+                    timeframe="5m",
+                    limit=1,
+                ),
+            ),
+        )
+        results: list[Any] = []
+        for label, operation in requests:
+            try:
+                results.append(self._retry(operation))
+            except (ccxt.BaseError, ValueError, TypeError) as exc:
+                errors.append(f"Futures {label}: {exc}")
+                results.append(None)
+
+        if isinstance(results[0], dict):
+            funding = results[0]
+        if isinstance(results[1], dict):
+            open_interest = results[1]
+        if isinstance(results[2], list):
+            ratios = results[2]
+        if not funding and not open_interest and not ratios:
+            return None, tuple(errors)
+
+        return (
+            futures_metrics_from_responses(
+                funding,
+                open_interest,
+                ratios,
+                updated_at=datetime.now(timezone.utc),
+            ),
+            tuple(errors),
+        )
+
     def fetch_closed_candles(self, timeframe: str | None = None) -> pd.DataFrame:
         timeframe = timeframe or self.settings.timeframe
         try:
@@ -203,6 +258,46 @@ def _usdm_symbol(symbol: str) -> str:
         return symbol
     base, quote = symbol.split("/", maxsplit=1)
     return f"{base}/{quote}:{quote}"
+
+
+def futures_metrics_from_responses(
+    funding: dict[str, Any],
+    open_interest: dict[str, Any],
+    ratios: list[dict[str, Any]],
+    *,
+    updated_at: datetime,
+) -> FuturesMetrics:
+    mark_price = _number(funding.get("markPrice"))
+    open_interest_amount = _number(open_interest.get("openInterestAmount"))
+    open_interest_value = _number(open_interest.get("openInterestValue"))
+    if (
+        open_interest_value is None
+        and open_interest_amount is not None
+        and mark_price is not None
+    ):
+        open_interest_value = open_interest_amount * mark_price
+
+    funding_timestamp = _first_number(
+        funding,
+        "nextFundingTimestamp",
+        "fundingTimestamp",
+    )
+    next_funding_at = (
+        datetime.fromtimestamp(funding_timestamp / 1000, tz=timezone.utc)
+        if funding_timestamp is not None
+        else None
+    )
+    latest_ratio = ratios[-1] if ratios else {}
+    return FuturesMetrics(
+        mark_price=mark_price,
+        index_price=_number(funding.get("indexPrice")),
+        funding_rate=_number(funding.get("fundingRate")),
+        next_funding_at=next_funding_at,
+        open_interest_amount=open_interest_amount,
+        open_interest_value=open_interest_value,
+        long_short_ratio=_number(latest_ratio.get("longShortRatio")),
+        updated_at=updated_at,
+    )
 
 
 def market_snapshot_from_ticker(

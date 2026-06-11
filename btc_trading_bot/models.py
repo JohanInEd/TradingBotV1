@@ -17,6 +17,27 @@ class MarketSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class FuturesMetrics:
+    mark_price: float | None
+    index_price: float | None
+    funding_rate: float | None
+    next_funding_at: datetime | None
+    open_interest_amount: float | None
+    open_interest_value: float | None
+    long_short_ratio: float | None
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshHealth:
+    status: str = "STARTING"
+    last_success_at: datetime | None = None
+    last_attempt_at: datetime | None = None
+    next_refresh_at: datetime | None = None
+    detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TimeframeConfirmation:
     candle_time: datetime
     close: float
@@ -109,3 +130,7 @@ class Evaluation:
     stream_status: str = "REST"
     stream_updated_at: datetime | None = None
     futures: FuturesRecommendation | None = None
+    futures_metrics: FuturesMetrics | None = None
+    market_health: RefreshHealth = field(default_factory=RefreshHealth)
+    futures_health: RefreshHealth = field(default_factory=RefreshHealth)
+    news_health: RefreshHealth = field(default_factory=RefreshHealth)

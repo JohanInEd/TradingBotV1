@@ -5,6 +5,7 @@ import pandas as pd
 from btc_trading_bot.config import Settings
 from btc_trading_bot.exchange import (
     ExchangeClient,
+    futures_metrics_from_responses,
     market_snapshot_from_ticker,
     merge_candle_update,
     resolve_exchange_spec,
@@ -135,3 +136,71 @@ def test_exchange_name_is_safe_for_legacy_windows_console() -> None:
     )()
 
     assert client.name == "Binance USD-M"
+
+
+def test_futures_metrics_normalize_public_binance_responses() -> None:
+    updated_at = datetime(2026, 6, 11, 14, 0, tzinfo=timezone.utc)
+
+    metrics = futures_metrics_from_responses(
+        {
+            "markPrice": 63_500.0,
+            "indexPrice": 63_550.0,
+            "fundingRate": 0.0001,
+            "fundingTimestamp": int(
+                datetime(2026, 6, 11, 16, 0, tzinfo=timezone.utc).timestamp()
+                * 1000
+            ),
+        },
+        {
+            "openInterestAmount": 100_000.0,
+            "openInterestValue": None,
+        },
+        [{"longShortRatio": 1.65}],
+        updated_at=updated_at,
+    )
+
+    assert metrics.mark_price == 63_500.0
+    assert metrics.index_price == 63_550.0
+    assert metrics.funding_rate == 0.0001
+    assert metrics.open_interest_value == 6_350_000_000.0
+    assert metrics.long_short_ratio == 1.65
+    assert metrics.next_funding_at == datetime(
+        2026, 6, 11, 16, 0, tzinfo=timezone.utc
+    )
+
+
+class _FakeDerivativesExchange:
+    id = "binanceusdm"
+
+    def fetch_funding_rate(self, symbol: str) -> dict[str, float]:
+        return {
+            "markPrice": 100.0,
+            "indexPrice": 99.5,
+            "fundingRate": 0.0002,
+        }
+
+    def fetch_open_interest(self, symbol: str) -> dict[str, float]:
+        return {"openInterestAmount": 25.0}
+
+    def fetch_long_short_ratio_history(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+    ) -> list[dict[str, float]]:
+        return [{"longShortRatio": 1.2}]
+
+
+def test_fetch_futures_metrics_uses_unified_ccxt_methods() -> None:
+    client = ExchangeClient.__new__(ExchangeClient)
+    client.settings = Settings()
+    client.spec = resolve_exchange_spec("binance-usdm", "BTC/USDT")
+    client.exchange = _FakeDerivativesExchange()
+
+    metrics, errors = client.fetch_futures_metrics()
+
+    assert errors == ()
+    assert metrics is not None
+    assert metrics.mark_price == 100.0
+    assert metrics.open_interest_amount == 25.0
+    assert metrics.long_short_ratio == 1.2

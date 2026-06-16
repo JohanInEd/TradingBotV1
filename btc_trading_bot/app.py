@@ -30,6 +30,7 @@ from btc_trading_bot.models import (
     SentimentAnalysis,
     TechnicalAnalysis,
 )
+from btc_trading_bot.microstructure import ShakeoutMonitor
 from btc_trading_bot.news import (
     NewsAnalyzer,
     NewsError,
@@ -50,6 +51,7 @@ class BotService:
         self.news = NewsAnalyzer(settings)
         self._live_candles: dict[str, Any] = {}
         self._price_range = None
+        self.shakeout = ShakeoutMonitor(settings)
 
     def evaluate(self, market: MarketSnapshot | None = None) -> Evaluation:
         errors: list[str] = []
@@ -65,6 +67,9 @@ class BotService:
 
         futures_metrics, futures_errors = self.refresh_futures_metrics()
         errors.extend(futures_errors)
+        shakeout = self.shakeout.apply_futures_metrics(
+            futures_metrics, datetime.now(timezone.utc)
+        )
         signal = calculate_signal(technical, sentiment, macro, self.settings)
         evaluated_at = datetime.now(timezone.utc)
         return Evaluation(
@@ -84,6 +89,7 @@ class BotService:
             news_updated_at=evaluated_at if news_succeeded else None,
             futures_metrics=futures_metrics,
             price_range=self._price_range,
+            shakeout=shakeout,
             market_health=RefreshHealth(
                 status="OK",
                 last_success_at=market.timestamp,
@@ -177,6 +183,17 @@ class BotService:
         self,
     ) -> tuple[FuturesMetrics | None, tuple[str, ...]]:
         return self.exchange.fetch_futures_metrics()
+
+    def apply_microstructure(
+        self, kind: str, payload: Any, received_at: datetime
+    ):
+        if kind == "depth":
+            return self.shakeout.apply_depth(payload, received_at)
+        if kind == "trade":
+            return self.shakeout.apply_trade(payload, received_at)
+        if kind == "liquidation":
+            return self.shakeout.apply_liquidation(payload, received_at)
+        return self.shakeout.analyze(received_at)
 
     def close(self) -> None:
         self.news.close()
@@ -387,6 +404,9 @@ def run(settings: Settings, once: bool = False) -> int:
                         metrics, errors = service.refresh_futures_metrics()
                         for error in errors:
                             evaluation = _with_error(evaluation, error)
+                        shakeout = service.shakeout.apply_futures_metrics(
+                            metrics, now
+                        )
                         evaluation = replace(
                             evaluation,
                             futures_metrics=(
@@ -394,6 +414,7 @@ def run(settings: Settings, once: bool = False) -> int:
                                 if metrics is not None
                                 else evaluation.futures_metrics
                             ),
+                            shakeout=shakeout,
                             futures_health=_completed_health(
                                 evaluation.futures_health,
                                 succeeded=metrics is not None,
@@ -527,6 +548,19 @@ def _apply_stream_events(
                         last_attempt_at=event.received_at,
                         detail=event.message,
                     ),
+                )
+        elif event.kind in {"depth", "trade", "liquidation"}:
+            try:
+                current = replace(
+                    current,
+                    shakeout=service.apply_microstructure(
+                        event.kind, event.payload, event.received_at
+                    ),
+                    stream_updated_at=event.received_at,
+                )
+            except Exception as exc:
+                current = _with_error(
+                    current, f"Microstructure update failed: {exc}"
                 )
     return current
 

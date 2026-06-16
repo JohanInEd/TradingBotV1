@@ -71,6 +71,8 @@ class Settings:
     max_position_fraction: float = 0.25
     price_range_horizon_hours: int = 24
     price_range_lookback_candles: int = 180
+    shakeout_window_seconds: int = 300
+    whale_trade_usd: float = 1_000_000.0
     feeds: tuple[NewsFeed, ...] = field(default_factory=lambda: DEFAULT_FEEDS)
 
     @classmethod
@@ -111,6 +113,12 @@ class Settings:
             ),
             price_range_lookback_candles=_env_int(
                 "BOT_PRICE_RANGE_LOOKBACK_CANDLES", 180, minimum=60, maximum=1000
+            ),
+            shakeout_window_seconds=_env_int(
+                "BOT_SHAKEOUT_WINDOW_SECONDS", 300, minimum=60, maximum=1800
+            ),
+            whale_trade_usd=_env_float(
+                "BOT_WHALE_TRADE_USD", 1_000_000.0, minimum=10_000.0
             ),
         )
 

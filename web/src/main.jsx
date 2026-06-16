@@ -101,6 +101,7 @@ function App() {
   const futures = evaluation?.futures;
   const futuresMetrics = evaluation?.futures_metrics;
   const priceRange = evaluation?.price_range;
+  const shakeout = evaluation?.shakeout;
 
   const allHeadlines = useMemo(() => {
     const crypto = sentiment?.headlines ?? [];
@@ -120,7 +121,7 @@ function App() {
           <LoadingPanel />
         ) : (
           <>
-            <section className="grid gap-4 lg:grid-cols-5">
+            <section className="grid gap-4 lg:grid-cols-6">
               <MetricCard
                 label={`${market.exchange} ${market.symbol}`}
                 value={formatUsd(market.price)}
@@ -151,10 +152,16 @@ function App() {
                 detail={`Confidence ${priceRange?.confidence ?? "-"} - ${priceRange?.sample_size ?? 0} samples`}
                 tone="neutral"
               />
+              <MetricCard
+                label="Shakeout Risk"
+                value={shakeout?.status ?? "WAITING"}
+                detail={`${shakeout?.direction ?? "Microstructure stream"} - ${formatNumber(shakeout?.score, 2)}`}
+                tone={shakeout?.status === "HIGH" ? "negative" : shakeout?.status === "MEDIUM" ? "warning" : "neutral"}
+              />
             </section>
 
             <section className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
-              <SignalPanel evaluation={evaluation} futures={futures} futuresMetrics={futuresMetrics} priceRange={priceRange} />
+              <SignalPanel evaluation={evaluation} futures={futures} futuresMetrics={futuresMetrics} priceRange={priceRange} shakeout={shakeout} />
               <NewsPanel headlines={allHeadlines} />
             </section>
 
@@ -199,6 +206,7 @@ function MetricCard({ label, value, detail, tone }) {
   const toneClass = {
     positive: "text-emerald-300",
     negative: "text-rose-300",
+    warning: "text-amber-200",
     neutral: "text-cyan-200"
   }[tone ?? "neutral"];
 
@@ -211,7 +219,7 @@ function MetricCard({ label, value, detail, tone }) {
   );
 }
 
-function SignalPanel({ evaluation, futures, futuresMetrics, priceRange }) {
+function SignalPanel({ evaluation, futures, futuresMetrics, priceRange, shakeout }) {
   const technical = evaluation.live_technical ?? evaluation.technical;
   return (
     <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
@@ -253,6 +261,32 @@ function SignalPanel({ evaluation, futures, futuresMetrics, priceRange }) {
           </div>
         </div>
       </div>
+
+      {shakeout ? (
+        <div className="mt-4 rounded-2xl border border-amber-300/20 bg-amber-300/10 p-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <p className="text-sm font-medium text-amber-100">Public microstructure shakeout risk</p>
+              <p className="mt-2 text-2xl font-semibold text-slate-100">
+                {shakeout.status} - {shakeout.direction}
+              </p>
+              <p className="mt-2 text-sm text-slate-300">{shakeout.reason}</p>
+            </div>
+            <div className="grid min-w-64 grid-cols-2 gap-2 rounded-xl bg-black/20 p-3 text-sm text-slate-300">
+              <MiniLine label="Score" value={formatNumber(shakeout.score, 2)} />
+              <MiniLine label="Book" value={formatNumber(shakeout.order_book_imbalance, 2)} />
+              <MiniLine label="Bid depth" value={formatCompactUsd(shakeout.bid_depth_usd)} />
+              <MiniLine label="Ask depth" value={formatCompactUsd(shakeout.ask_depth_usd)} />
+              <MiniLine label="Taker buy" value={formatCompactUsd(shakeout.taker_buy_usd)} />
+              <MiniLine label="Taker sell" value={formatCompactUsd(shakeout.taker_sell_usd)} />
+              <MiniLine label="Liq buy" value={formatCompactUsd(shakeout.liquidation_buy_usd)} />
+              <MiniLine label="Liq sell" value={formatCompactUsd(shakeout.liquidation_sell_usd)} />
+              <MiniLine label="Large trades" value={shakeout.large_trade_count} />
+              <MiniLine label="OI change" value={formatPct(shakeout.open_interest_change_percent)} />
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {priceRange ? (
         <div className="mt-4 rounded-2xl border border-cyan-300/20 bg-cyan-300/10 p-4">
@@ -393,6 +427,15 @@ function formatUsd(value) {
     currency: "USD",
     maximumFractionDigits: 2
   }).format(Number(value));
+}
+
+function formatCompactUsd(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  const amount = Number(value);
+  if (Math.abs(amount) >= 1_000_000_000) return `$${(amount / 1_000_000_000).toFixed(2)}B`;
+  if (Math.abs(amount) >= 1_000_000) return `$${(amount / 1_000_000).toFixed(2)}M`;
+  if (Math.abs(amount) >= 1_000) return `$${(amount / 1_000).toFixed(2)}K`;
+  return formatUsd(amount);
 }
 
 function formatPct(value, digits = 2) {

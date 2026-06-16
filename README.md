@@ -41,6 +41,10 @@ In Binance USD-M mode, the dashboard also displays public derivatives context:
 mark and index price, perpetual basis, funding rate and countdown, open
 interest, and the global long/short account ratio. These metrics are currently
 confirmation context and do not alter the established 40/30/30 signal weights.
+It also listens to public order-book depth, aggregate trades, and liquidation
+events to estimate live shakeout-risk context. This is an alerting layer for
+possible upside squeezes or downside stop runs, not a prediction guarantee and
+not a trade trigger by itself.
 
 ## Install
 
@@ -149,6 +153,8 @@ After `web/dist` exists, `btc-tri-factor-web` serves the built interface from
 | `BOT_MAX_POSITION_FRACTION` | `0.25` | Maximum margin allocation |
 | `BOT_PRICE_RANGE_HORIZON_HOURS` | `24` | Historical low/high estimate horizon |
 | `BOT_PRICE_RANGE_LOOKBACK_CANDLES` | `180` | Recent 4h candles used for range samples |
+| `BOT_SHAKEOUT_WINDOW_SECONDS` | `300` | Rolling window for order-flow and liquidation stress |
+| `BOT_WHALE_TRADE_USD` | `1000000` | Minimum notional for a large taker trade alert |
 
 ## Test
 
@@ -166,6 +172,7 @@ The bot is organized as a small Python package with these responsibilities:
 - `news.py`: Bitcoin sentiment and macro-risk analysis.
 - `strategy.py`: weighted tri-factor score and final signal classification.
 - `futures.py`: long/short/flat guidance and risk-based paper sizing.
+- `microstructure.py`: rolling order-book, taker-flow, liquidation, and open-interest shakeout risk.
 - `app.py`: evaluation scheduling and service orchestration.
 - `dashboard.py`: Rich terminal dashboard and static report.
 - `models.py`: immutable analysis and evaluation data models.
@@ -192,6 +199,14 @@ the last valid news analysis during a temporary feed outage.
 The evaluation also estimates a historical low/high range for the next 24 hours
 by reviewing prior forward windows from recent 4-hour candles. This is a
 probabilistic support/resistance context, not a guaranteed forecast.
+
+In Binance USD-M mode, the live stream additionally subscribes to public
+top-of-book depth, aggregate market trades, and force-liquidation snapshots.
+The shakeout monitor scores visible stress from thin bid/ask liquidity,
+aggressive taker flow, large notional trades, liquidation bursts, open-interest
+changes, and top-trader long/short crowding. Public order books can be spoofed
+and do not identify wallets, so the output is treated as risk context rather
+than proof of whale intent.
 
 The header reports independent Market, Futures, and News refresh health. Each
 source shows its current state, age of the last successful update, and next

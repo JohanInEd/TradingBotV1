@@ -131,6 +131,27 @@ class PriceRangeForecast:
 
 
 @dataclass(frozen=True, slots=True)
+class ShakeoutAnalysis:
+    status: str
+    direction: str
+    score: float
+    order_book_imbalance: float | None
+    bid_depth_usd: float | None
+    ask_depth_usd: float | None
+    taker_buy_usd: float
+    taker_sell_usd: float
+    large_trade_count: int
+    large_trade_net_usd: float
+    liquidation_buy_usd: float
+    liquidation_sell_usd: float
+    liquidation_count: int
+    open_interest_change_percent: float | None
+    top_trader_long_short_ratio: float | None
+    reason: str
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Evaluation:
     market: MarketSnapshot
     technical: TechnicalAnalysis
@@ -147,6 +168,7 @@ class Evaluation:
     futures: FuturesRecommendation | None = None
     futures_metrics: FuturesMetrics | None = None
     price_range: PriceRangeForecast | None = None
+    shakeout: ShakeoutAnalysis | None = None
     market_health: RefreshHealth = field(default_factory=RefreshHealth)
     futures_health: RefreshHealth = field(default_factory=RefreshHealth)
     news_health: RefreshHealth = field(default_factory=RefreshHealth)

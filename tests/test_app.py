@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from btc_trading_bot.app import (
     _apply_news_refresh,
+    _apply_stream_events,
     _configure_console_encoding,
     _market_is_stale,
 )
@@ -14,6 +15,7 @@ from btc_trading_bot.models import (
     TechnicalAnalysis,
 )
 from btc_trading_bot.strategy import calculate_signal
+from btc_trading_bot.realtime import StreamEvent
 
 
 def _technical(score: float) -> TechnicalAnalysis:
@@ -123,6 +125,31 @@ def test_market_staleness_controls_rest_fallback() -> None:
 
     assert not _market_is_stale(fresh, now, stale_seconds=15)
     assert _market_is_stale(stale, now, stale_seconds=15)
+
+
+def test_stream_events_attach_microstructure_analysis() -> None:
+    now = datetime.now(timezone.utc)
+
+    class Service:
+        def apply_microstructure(self, kind, payload, received_at):
+            assert kind == "trade"
+            assert payload["p"] == "100"
+            return "analysis"
+
+    evaluation = _apply_stream_events(
+        _evaluation(),
+        Service(),
+        [
+            StreamEvent(
+                kind="trade",
+                received_at=now,
+                payload={"p": "100", "q": "10", "m": False},
+            )
+        ],
+    )
+
+    assert evaluation.shakeout == "analysis"
+    assert evaluation.stream_updated_at == now
 
 
 def test_console_encoding_replaces_unsupported_characters(monkeypatch) -> None:

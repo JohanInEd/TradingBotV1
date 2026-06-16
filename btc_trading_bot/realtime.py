@@ -118,6 +118,8 @@ class RealtimeMarketStream:
                         self._watch_candles(exchange, timeframe)
                     )
                 )
+            if self.exchange_id == "binanceusdm":
+                tasks.extend(self._binance_microstructure_tasks(session))
             self._publish_status("LIVE")
             while not self._stop.is_set():
                 await asyncio.sleep(0.25)
@@ -179,6 +181,74 @@ class RealtimeMarketStream:
                 )
                 await asyncio.sleep(self.settings.stream_retry_seconds)
 
+    def _binance_microstructure_tasks(
+        self, session: aiohttp.ClientSession
+    ) -> list[asyncio.Task[None]]:
+        symbol = _binance_stream_symbol(self.symbol)
+        return [
+            asyncio.create_task(
+                self._watch_binance_stream(
+                    session,
+                    "public",
+                    {f"{symbol}@depth20@100ms": "depth"},
+                )
+            ),
+            asyncio.create_task(
+                self._watch_binance_stream(
+                    session,
+                    "market",
+                    {
+                        f"{symbol}@aggTrade": "trade",
+                        f"{symbol}@forceOrder": "liquidation",
+                    },
+                )
+            ),
+        ]
+
+    async def _watch_binance_stream(
+        self,
+        session: aiohttp.ClientSession,
+        route: str,
+        streams: dict[str, str],
+    ) -> None:
+        stream_names = "/".join(streams)
+        url = f"wss://fstream.binance.com/{route}/stream?streams={stream_names}"
+        while not self._stop.is_set():
+            try:
+                async with session.ws_connect(
+                    url,
+                    heartbeat=120,
+                    receive_timeout=self.settings.stream_stale_seconds * 4,
+                ) as websocket:
+                    async for message in websocket:
+                        if self._stop.is_set():
+                            return
+                        if message.type == aiohttp.WSMsgType.TEXT:
+                            payload = message.json()
+                            stream = payload.get("stream")
+                            data = payload.get("data")
+                            kind = streams.get(stream)
+                            if kind is not None and data is not None:
+                                self._publish(
+                                    StreamEvent(
+                                        kind=kind,
+                                        received_at=datetime.now(timezone.utc),
+                                        payload=data,
+                                    )
+                                )
+                        elif message.type in {
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.ERROR,
+                        }:
+                            break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._publish_status(
+                    f"Microstructure {route} reconnecting: {exc}"
+                )
+                await asyncio.sleep(self.settings.stream_retry_seconds)
+
     def _publish_status(self, message: str) -> None:
         self._publish(
             StreamEvent(
@@ -200,3 +270,8 @@ class RealtimeMarketStream:
                 self.events.put_nowait(event)
             except queue.Full:
                 LOGGER.warning("Dropping realtime event because queue is full")
+
+
+def _binance_stream_symbol(symbol: str) -> str:
+    market_symbol = symbol.split(":", maxsplit=1)[0]
+    return market_symbol.replace("/", "").lower()

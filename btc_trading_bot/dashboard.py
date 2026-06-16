@@ -32,6 +32,7 @@ def build_dashboard(evaluation: Evaluation) -> Layout:
     layout["right"].split_column(
         Layout(_sentiment_panel(evaluation), name="sentiment", ratio=1),
         Layout(_macro_panel(evaluation), name="macro", ratio=1),
+        Layout(_shakeout_panel(evaluation), name="shakeout", size=9),
     )
     return layout
 
@@ -43,6 +44,7 @@ def build_static_report(evaluation: Evaluation) -> Group:
         _technical_panel(evaluation),
         _sentiment_panel(evaluation),
         _macro_panel(evaluation),
+        _shakeout_panel(evaluation),
         _score_panel(evaluation),
         _signal_panel(evaluation),
     )
@@ -218,6 +220,62 @@ def _macro_panel(evaluation: Evaluation) -> Panel:
             + _updated_suffix(evaluation.news_updated_at)
         ),
         border_style="yellow",
+        box=box.ROUNDED,
+    )
+
+
+def _shakeout_panel(evaluation: Evaluation) -> Panel:
+    shakeout = evaluation.shakeout
+    if shakeout is None:
+        content = Text(
+            "Shakeout risk is available in Binance USD-M mode after public "
+            "depth, trade, and liquidation streams begin publishing.",
+            style="dim",
+        )
+        return Panel(
+            content,
+            title="[bold]Shakeout Risk[/bold]",
+            border_style="white",
+            box=box.ROUNDED,
+        )
+
+    style = (
+        "bold red"
+        if shakeout.status == "HIGH"
+        else "bold yellow"
+        if shakeout.status == "MEDIUM"
+        else "cyan"
+        if shakeout.status == "LOW"
+        else "green"
+    )
+    table = Table(box=None, expand=True, show_header=False)
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Status", shakeout.status, style=style)
+    table.add_row("Direction", shakeout.direction)
+    table.add_row("Score", f"{shakeout.score:.2f}")
+    if shakeout.order_book_imbalance is not None:
+        table.add_row("Book imbalance", f"{shakeout.order_book_imbalance:+.2f}")
+    if shakeout.bid_depth_usd is not None and shakeout.ask_depth_usd is not None:
+        table.add_row(
+            "Depth bid/ask",
+            f"{_compact_usd(shakeout.bid_depth_usd)} / {_compact_usd(shakeout.ask_depth_usd)}",
+        )
+    table.add_row(
+        "Taker buy/sell",
+        f"{_compact_usd(shakeout.taker_buy_usd)} / {_compact_usd(shakeout.taker_sell_usd)}",
+    )
+    table.add_row(
+        "Liq buy/sell",
+        f"{_compact_usd(shakeout.liquidation_buy_usd)} / {_compact_usd(shakeout.liquidation_sell_usd)}",
+    )
+    if shakeout.open_interest_change_percent is not None:
+        table.add_row("OI change", f"{shakeout.open_interest_change_percent:+.2f}%")
+    table.add_row("Reason", shakeout.reason)
+    return Panel(
+        table,
+        title="[bold]Shakeout Risk[/bold]",
+        border_style=style,
         box=box.ROUNDED,
     )
 

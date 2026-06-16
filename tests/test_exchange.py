@@ -10,6 +10,7 @@ from btc_trading_bot.exchange import (
     merge_candle_update,
     resolve_exchange_spec,
 )
+from btc_trading_bot.realtime import _binance_stream_symbol
 
 
 class _FakeExchange:
@@ -125,6 +126,10 @@ def test_binance_usdm_preserves_explicit_settlement_symbol() -> None:
     spec = resolve_exchange_spec("binance-usdm", "ETH/USDT:USDT")
 
     assert spec.symbol == "ETH/USDT:USDT"
+
+
+def test_binance_stream_symbol_removes_slash_and_settlement() -> None:
+    assert _binance_stream_symbol("BTC/USDT:USDT") == "btcusdt"
 
 
 def test_exchange_name_is_safe_for_legacy_windows_console() -> None:

@@ -302,9 +302,7 @@ class WebStateService:
                 metrics, errors = self.service.refresh_futures_metrics()
                 for error in errors:
                     evaluation = _with_error(evaluation, error)
-                shakeout = self.service.shakeout.apply_futures_metrics(
-                    metrics, now
-                )
+                shakeout = self.service.apply_futures_metrics(metrics, now)
                 evaluation = replace(
                     evaluation,
                     futures_metrics=metrics or evaluation.futures_metrics,

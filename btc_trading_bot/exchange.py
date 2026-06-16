@@ -98,7 +98,9 @@ class ExchangeClient:
             except Exception as exc:
                 failures.append(f"{exchange_id}: {exc}")
                 LOGGER.warning("Exchange connection failed: %s", failures[-1])
-                exchange.close()
+                close = getattr(exchange, "close", None)
+                if callable(close):
+                    close()
         raise MarketDataError("No exchange available: " + "; ".join(failures))
 
     def _retry(self, operation: Callable[[], Any]) -> Any:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +74,7 @@ class Settings:
     price_range_lookback_candles: int = 180
     shakeout_window_seconds: int = 300
     whale_trade_usd: float = 1_000_000.0
+    shakeout_event_log_path: Path | None = None
     feeds: tuple[NewsFeed, ...] = field(default_factory=lambda: DEFAULT_FEEDS)
 
     @classmethod
@@ -120,6 +122,7 @@ class Settings:
             whale_trade_usd=_env_float(
                 "BOT_WHALE_TRADE_USD", 1_000_000.0, minimum=10_000.0
             ),
+            shakeout_event_log_path=_env_path("BOT_SHAKEOUT_EVENT_LOG"),
         )
 
 
@@ -150,3 +153,10 @@ def _env_float(
         return min(maximum, value) if maximum is not None else value
     except ValueError:
         return default
+
+
+def _env_path(name: str) -> Path | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    return Path(raw).expanduser()

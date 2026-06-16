@@ -30,7 +30,7 @@ from btc_trading_bot.models import (
     SentimentAnalysis,
     TechnicalAnalysis,
 )
-from btc_trading_bot.microstructure import ShakeoutMonitor
+from btc_trading_bot.microstructure import ShakeoutEventRecorder, ShakeoutMonitor
 from btc_trading_bot.news import (
     NewsAnalyzer,
     NewsError,
@@ -52,6 +52,11 @@ class BotService:
         self._live_candles: dict[str, Any] = {}
         self._price_range = None
         self.shakeout = ShakeoutMonitor(settings)
+        self._shakeout_recorder = (
+            ShakeoutEventRecorder(settings.shakeout_event_log_path)
+            if settings.shakeout_event_log_path is not None
+            else None
+        )
 
     def evaluate(self, market: MarketSnapshot | None = None) -> Evaluation:
         errors: list[str] = []
@@ -67,7 +72,7 @@ class BotService:
 
         futures_metrics, futures_errors = self.refresh_futures_metrics()
         errors.extend(futures_errors)
-        shakeout = self.shakeout.apply_futures_metrics(
+        shakeout = self.apply_futures_metrics(
             futures_metrics, datetime.now(timezone.utc)
         )
         signal = calculate_signal(technical, sentiment, macro, self.settings)
@@ -188,12 +193,38 @@ class BotService:
         self, kind: str, payload: Any, received_at: datetime
     ):
         if kind == "depth":
-            return self.shakeout.apply_depth(payload, received_at)
-        if kind == "trade":
-            return self.shakeout.apply_trade(payload, received_at)
-        if kind == "liquidation":
-            return self.shakeout.apply_liquidation(payload, received_at)
-        return self.shakeout.analyze(received_at)
+            analysis = self.shakeout.apply_depth(payload, received_at)
+        elif kind == "trade":
+            analysis = self.shakeout.apply_trade(payload, received_at)
+        elif kind == "liquidation":
+            analysis = self.shakeout.apply_liquidation(payload, received_at)
+        else:
+            analysis = self.shakeout.analyze(received_at)
+        self._record_shakeout(kind, payload, received_at, analysis)
+        return analysis
+
+    def apply_futures_metrics(
+        self, metrics: FuturesMetrics | None, received_at: datetime
+    ):
+        analysis = self.shakeout.apply_futures_metrics(metrics, received_at)
+        self._record_shakeout("futures_metrics", metrics, received_at, analysis)
+        return analysis
+
+    def _record_shakeout(
+        self,
+        kind: str,
+        payload: Any,
+        received_at: datetime,
+        analysis: Any,
+    ) -> None:
+        if self._shakeout_recorder is None:
+            return
+        self._shakeout_recorder.record(
+            kind=kind,
+            payload=payload,
+            received_at=received_at,
+            analysis=analysis,
+        )
 
     def close(self) -> None:
         self.news.close()
@@ -404,9 +435,7 @@ def run(settings: Settings, once: bool = False) -> int:
                         metrics, errors = service.refresh_futures_metrics()
                         for error in errors:
                             evaluation = _with_error(evaluation, error)
-                        shakeout = service.shakeout.apply_futures_metrics(
-                            metrics, now
-                        )
+                        shakeout = service.apply_futures_metrics(metrics, now)
                         evaluation = replace(
                             evaluation,
                             futures_metrics=(

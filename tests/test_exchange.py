@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+import pytest
 
 from btc_trading_bot.config import Settings
 from btc_trading_bot.exchange import (
     ExchangeClient,
+    MarketDataError,
     futures_metrics_from_responses,
     market_snapshot_from_ticker,
     merge_candle_update,
@@ -141,6 +143,26 @@ def test_exchange_name_is_safe_for_legacy_windows_console() -> None:
     )()
 
     assert client.name == "Binance USD-M"
+
+
+def test_connect_failure_tolerates_exchange_without_close(monkeypatch) -> None:
+    class BrokenExchange:
+        name = "Broken"
+        markets = {}
+        has = {}
+
+        def __init__(self, config):
+            self.id = "broken"
+
+        def load_markets(self):
+            raise RuntimeError("network blocked")
+
+    import btc_trading_bot.exchange as exchange_module
+
+    monkeypatch.setattr(exchange_module.ccxt, "broken", BrokenExchange, raising=False)
+
+    with pytest.raises(MarketDataError, match="network blocked"):
+        ExchangeClient(Settings(exchange="broken", max_retries=1))
 
 
 def test_futures_metrics_normalize_public_binance_responses() -> None:

@@ -155,6 +155,25 @@ After `web/dist` exists, `btc-tri-factor-web` serves the built interface from
 | `BOT_PRICE_RANGE_LOOKBACK_CANDLES` | `180` | Recent 4h candles used for range samples |
 | `BOT_SHAKEOUT_WINDOW_SECONDS` | `300` | Rolling window for order-flow and liquidation stress |
 | `BOT_WHALE_TRADE_USD` | `1000000` | Minimum notional for a large taker trade alert |
+| `BOT_SHAKEOUT_EVENT_LOG` | unset | Optional JSONL file for recording shakeout inputs and replay analysis |
+
+To record live public depth, aggregate trade, liquidation, open-interest, and
+top-trader crowding inputs for later shakeout review:
+
+```powershell
+$env:BOT_EXCHANGE = "binance-usdm"
+$env:BOT_SHAKEOUT_EVENT_LOG = "data/shakeout-events.jsonl"
+btc-tri-factor-web
+```
+
+Replay the file with the same monitor logic:
+
+```powershell
+btc-shakeout-backtest data/shakeout-events.jsonl
+```
+
+The replay summarizes observed risk states and peak score. It does not change
+the live signal matrix and does not create trade triggers.
 
 ## Test
 
@@ -204,9 +223,10 @@ In Binance USD-M mode, the live stream additionally subscribes to public
 top-of-book depth, aggregate market trades, and force-liquidation snapshots.
 The shakeout monitor scores visible stress from thin bid/ask liquidity,
 aggressive taker flow, large notional trades, liquidation bursts, open-interest
-changes, and top-trader long/short crowding. Public order books can be spoofed
-and do not identify wallets, so the output is treated as risk context rather
-than proof of whale intent.
+changes, and top-trader long/short crowding. Reason text includes the measured
+driver, such as net taker flow over the rolling window or visible bid/ask depth
+skew. Public order books can be spoofed and do not identify wallets, so the
+output is treated as risk context rather than proof of whale intent.
 
 The header reports independent Market, Futures, and News refresh health. Each
 source shows its current state, age of the last successful update, and next

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from btc_trading_bot.config import Settings
@@ -118,8 +120,10 @@ class ShakeoutMonitor:
             ask_depth=ask_depth,
             book_imbalance=book_imbalance,
             taker_imbalance=taker_imbalance,
+            taker_total=taker_buy + taker_sell,
             large_net=large_net,
             liq_imbalance=liq_imbalance,
+            liq_total=liq_buy + liq_sell,
             oi_change=oi_change,
         )
         score = min(1.0, max(upside, downside))
@@ -160,74 +164,123 @@ class ShakeoutMonitor:
         ask_depth: float | None,
         book_imbalance: float | None,
         taker_imbalance: float | None,
+        taker_total: float,
         large_net: float,
         liq_imbalance: float | None,
+        liq_total: float,
         oi_change: float | None,
     ) -> tuple[float, float, list[str]]:
         upside = 0.0
         downside = 0.0
         reasons: list[str] = []
+        window_label = _window_label(self.settings.shakeout_window_seconds)
 
         if bid_depth is not None and ask_depth is not None and bid_depth > 0 and ask_depth > 0:
-            if ask_depth < bid_depth * 0.65:
-                upside += 0.22
-                reasons.append("thin ask liquidity")
-            if bid_depth < ask_depth * 0.65:
-                downside += 0.22
-                reasons.append("thin bid liquidity")
-        if book_imbalance is not None and abs(book_imbalance) > 0.35:
+            ask_ratio = ask_depth / bid_depth
+            bid_ratio = bid_depth / ask_depth
+            if ask_ratio < 0.45:
+                upside += 0.30
+                reasons.append(
+                    f"thin ask liquidity ({_compact_usd(ask_depth)} ask vs {_compact_usd(bid_depth)} bid)"
+                )
+            elif ask_ratio < 0.70:
+                upside += 0.20
+                reasons.append(
+                    f"thin ask liquidity ({_compact_usd(ask_depth)} ask vs {_compact_usd(bid_depth)} bid)"
+                )
+            if bid_ratio < 0.45:
+                downside += 0.30
+                reasons.append(
+                    f"thin bid liquidity ({_compact_usd(bid_depth)} bid vs {_compact_usd(ask_depth)} ask)"
+                )
+            elif bid_ratio < 0.70:
+                downside += 0.20
+                reasons.append(
+                    f"thin bid liquidity ({_compact_usd(bid_depth)} bid vs {_compact_usd(ask_depth)} ask)"
+                )
+        if book_imbalance is not None and abs(book_imbalance) > 0.40:
             if book_imbalance > 0:
-                upside += 0.08
+                upside += 0.06
             else:
-                downside += 0.08
+                downside += 0.06
 
-        if taker_imbalance is not None and abs(taker_imbalance) > 0.20:
-            contribution = min(0.24, abs(taker_imbalance) * 0.24)
+        min_flow = self.settings.whale_trade_usd * 0.20
+        if (
+            taker_imbalance is not None
+            and taker_total >= min_flow
+            and abs(taker_imbalance) >= 0.25
+        ):
+            contribution = min(0.28, 0.10 + abs(taker_imbalance) * 0.18)
+            net_flow = taker_total * abs(taker_imbalance)
             if taker_imbalance > 0:
                 upside += contribution
-                reasons.append("aggressive buy flow")
+                reasons.append(
+                    f"aggressive buy flow ({_compact_usd(net_flow)} net over {window_label})"
+                )
             else:
                 downside += contribution
-                reasons.append("aggressive sell flow")
+                reasons.append(
+                    f"aggressive sell flow ({_compact_usd(net_flow)} net over {window_label})"
+                )
 
         if abs(large_net) >= self.settings.whale_trade_usd:
-            contribution = min(0.18, abs(large_net) / (self.settings.whale_trade_usd * 8) * 0.18)
+            contribution = min(
+                0.18,
+                abs(large_net) / (self.settings.whale_trade_usd * 4) * 0.18,
+            )
             if large_net > 0:
                 upside += contribution
-                reasons.append("large taker buys")
+                reasons.append(f"large taker buys ({_compact_usd(abs(large_net))} net)")
             else:
                 downside += contribution
-                reasons.append("large taker sells")
+                reasons.append(f"large taker sells ({_compact_usd(abs(large_net))} net)")
 
-        if liq_imbalance is not None and abs(liq_imbalance) > 0.20:
-            contribution = min(0.24, abs(liq_imbalance) * 0.24)
+        min_liquidations = max(5_000.0, self.settings.whale_trade_usd * 0.05)
+        if (
+            liq_imbalance is not None
+            and liq_total >= min_liquidations
+            and abs(liq_imbalance) >= 0.25
+        ):
+            contribution = min(0.30, 0.10 + abs(liq_imbalance) * 0.20)
+            net_liquidations = liq_total * abs(liq_imbalance)
             if liq_imbalance > 0:
                 upside += contribution
-                reasons.append("short liquidation burst")
+                reasons.append(
+                    f"short liquidation burst ({_compact_usd(net_liquidations)} over {window_label})"
+                )
             else:
                 downside += contribution
-                reasons.append("long liquidation burst")
+                reasons.append(
+                    f"long liquidation burst ({_compact_usd(net_liquidations)} over {window_label})"
+                )
 
         ratio = self._top_trader_long_short_ratio
         if ratio is not None:
-            if ratio >= 1.50:
-                downside += 0.12
-                reasons.append("top traders crowded long")
+            if ratio >= 2.00:
+                downside += 0.16
+                reasons.append(f"top traders crowded long (L/S {ratio:.2f})")
+            elif ratio >= 1.50:
+                downside += 0.10
+                reasons.append(f"top traders crowded long (L/S {ratio:.2f})")
+            elif ratio <= 0.50:
+                upside += 0.16
+                reasons.append(f"top traders crowded short (L/S {ratio:.2f})")
             elif ratio <= 0.75:
-                upside += 0.12
-                reasons.append("top traders crowded short")
+                upside += 0.10
+                reasons.append(f"top traders crowded short (L/S {ratio:.2f})")
 
         if oi_change is not None and abs(oi_change) >= 1.0:
             if oi_change > 0:
-                upside += 0.05
-                downside += 0.05
-                reasons.append("open interest building")
+                contribution = 0.07 if oi_change >= 3.0 else 0.04
+                upside += contribution
+                downside += contribution
+                reasons.append(f"open interest building ({oi_change:+.2f}%)")
             elif taker_imbalance is not None:
                 if taker_imbalance > 0:
-                    upside += 0.07
+                    upside += 0.06
                 elif taker_imbalance < 0:
-                    downside += 0.07
-                reasons.append("open interest flushing")
+                    downside += 0.06
+                reasons.append(f"open interest flushing ({oi_change:+.2f}%)")
 
         return min(1.0, upside), min(1.0, downside), reasons[:5]
 
@@ -286,10 +339,120 @@ def _number(value: Any) -> float | None:
 
 
 def _status(score: float) -> str:
-    if score >= 0.65:
+    if score >= 0.70:
         return "HIGH"
-    if score >= 0.35:
+    if score >= 0.45:
         return "MEDIUM"
-    if score >= 0.15:
+    if score >= 0.20:
         return "LOW"
     return "CALM"
+
+
+class ShakeoutEventRecorder:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def record(
+        self,
+        *,
+        kind: str,
+        received_at: datetime,
+        payload: Any,
+        analysis: ShakeoutAnalysis,
+    ) -> None:
+        event = {
+            "kind": kind,
+            "received_at": received_at.isoformat(),
+            "payload": _jsonable(payload),
+            "analysis": _jsonable(analysis),
+        }
+        with self.path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(event, separators=(",", ":")) + "\n")
+
+
+def replay_shakeout_events(
+    path: Path,
+    settings: Settings,
+) -> list[ShakeoutAnalysis]:
+    monitor = ShakeoutMonitor(settings)
+    analyses: list[ShakeoutAnalysis] = []
+    with path.open(encoding="utf-8") as file:
+        for line in file:
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            kind = str(event.get("kind", ""))
+            received_at = _parse_datetime(event.get("received_at"))
+            payload = event.get("payload")
+            if kind == "depth":
+                analyses.append(monitor.apply_depth(payload, received_at))
+            elif kind == "trade":
+                analyses.append(monitor.apply_trade(payload, received_at))
+            elif kind == "liquidation":
+                analyses.append(monitor.apply_liquidation(payload, received_at))
+            elif kind == "futures_metrics":
+                analyses.append(
+                    monitor.apply_futures_metrics(
+                        _futures_metrics_from_payload(payload), received_at
+                    )
+                )
+    return analyses
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if is_dataclass(value):
+        return _jsonable(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _parse_datetime(value: Any) -> datetime:
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is not None:
+            return parsed
+        return parsed.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+def _futures_metrics_from_payload(payload: Any) -> FuturesMetrics | None:
+    if not isinstance(payload, dict):
+        return None
+    updated_at = _parse_datetime(payload.get("updated_at"))
+    next_funding_at = (
+        _parse_datetime(payload["next_funding_at"])
+        if payload.get("next_funding_at")
+        else None
+    )
+    return FuturesMetrics(
+        mark_price=_number(payload.get("mark_price")),
+        index_price=_number(payload.get("index_price")),
+        funding_rate=_number(payload.get("funding_rate")),
+        next_funding_at=next_funding_at,
+        open_interest_amount=_number(payload.get("open_interest_amount")),
+        open_interest_value=_number(payload.get("open_interest_value")),
+        long_short_ratio=_number(payload.get("long_short_ratio")),
+        updated_at=updated_at,
+    )
+
+
+def _window_label(seconds: int) -> str:
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+def _compact_usd(value: float) -> str:
+    if abs(value) >= 1_000_000_000:
+        return f"${value / 1_000_000_000:.2f}B"
+    if abs(value) >= 1_000_000:
+        return f"${value / 1_000_000:.2f}M"
+    if abs(value) >= 1_000:
+        return f"${value / 1_000:.2f}K"
+    return f"${value:,.2f}"

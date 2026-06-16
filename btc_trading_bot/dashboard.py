@@ -27,6 +27,7 @@ def build_dashboard(evaluation: Evaluation) -> Layout:
     )
     layout["left"].split_column(
         Layout(_technical_panel(evaluation), name="technical", ratio=1),
+        Layout(_market_context_panel(evaluation), name="market_context", size=9),
         Layout(_score_panel(evaluation), name="score", size=9),
     )
     layout["right"].split_column(
@@ -42,6 +43,7 @@ def build_static_report(evaluation: Evaluation) -> Group:
     return Group(
         _header(evaluation),
         _technical_panel(evaluation),
+        _market_context_panel(evaluation),
         _sentiment_panel(evaluation),
         _macro_panel(evaluation),
         _shakeout_panel(evaluation),
@@ -169,6 +171,43 @@ def _technical_panel(evaluation: Evaluation) -> Panel:
         table,
         title=title,
         border_style="cyan",
+        box=box.ROUNDED,
+    )
+
+
+def _market_context_panel(evaluation: Evaluation) -> Panel:
+    context = evaluation.market_context
+    if context is None:
+        return Panel(
+            Text("Market context is waiting for completed candle history.", style="dim"),
+            title="[bold]Market Context[/bold]",
+            border_style="white",
+            box=box.ROUNDED,
+        )
+
+    volatility_style = (
+        "bold red"
+        if context.volatility_regime == "HIGH VOLATILITY"
+        else "bold yellow"
+        if context.volatility_regime == "ELEVATED VOLATILITY"
+        else "cyan"
+        if context.volatility_regime == "COMPRESSED VOLATILITY"
+        else "green"
+    )
+    table = Table(box=None, expand=True, show_header=False)
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Volatility", context.volatility_regime, style=volatility_style)
+    table.add_row("Structure", context.structure_regime)
+    table.add_row("ATR / realized", f"{context.atr_percent:.2f}% / {context.realized_volatility_percent:.2f}%")
+    table.add_row("Bollinger width", f"{context.bollinger_width_percent:.2f}%")
+    table.add_row("Range position", f"{context.range_position_percent:.0f}%")
+    table.add_row("Trend spread", f"{context.trend_strength_percent:.2f}%")
+    table.add_row("Reason", context.reason)
+    return Panel(
+        table,
+        title="[bold]Market Context[/bold]",
+        border_style=volatility_style,
         box=box.ROUNDED,
     )
 

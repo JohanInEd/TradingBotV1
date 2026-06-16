@@ -21,6 +21,7 @@ from btc_trading_bot.exchange import (
 )
 from btc_trading_bot.futures import build_futures_recommendation
 from btc_trading_bot.indicators import analyze_multi_timeframe
+from btc_trading_bot.market_context import analyze_market_context
 from btc_trading_bot.models import (
     Evaluation,
     FuturesMetrics,
@@ -51,6 +52,7 @@ class BotService:
         self.news = NewsAnalyzer(settings)
         self._live_candles: dict[str, Any] = {}
         self._price_range = None
+        self._market_context = None
         self.shakeout = ShakeoutMonitor(settings)
         self._shakeout_recorder = (
             ShakeoutEventRecorder(settings.shakeout_event_log_path)
@@ -94,6 +96,7 @@ class BotService:
             news_updated_at=evaluated_at if news_succeeded else None,
             futures_metrics=futures_metrics,
             price_range=self._price_range,
+            market_context=self._market_context,
             shakeout=shakeout,
             market_health=RefreshHealth(
                 status="OK",
@@ -137,11 +140,16 @@ class BotService:
                 lookback_candles=self.settings.price_range_lookback_candles,
             ),
         )
+        self._market_context = analyze_market_context(four_hour_candles)
         return self._analyze_candles(self._live_candles)
 
     @property
     def price_range(self):
         return self._price_range
+
+    @property
+    def market_context(self):
+        return self._market_context
 
     def apply_live_candle(
         self, timeframe: str, row: list[Any] | tuple[Any, ...]
@@ -152,7 +160,12 @@ class BotService:
         self._live_candles[timeframe] = merge_candle_update(
             candles, row, self.settings.candle_limit
         )
-        return self._analyze_candles(self._live_candles)
+        technical = self._analyze_candles(self._live_candles)
+        if timeframe == self.settings.timeframe:
+            self._market_context = analyze_market_context(
+                self._live_candles[timeframe]
+            )
+        return technical
 
     def _analyze_candles(
         self, candles: dict[str, Any]
@@ -339,6 +352,7 @@ def run(settings: Settings, once: bool = False) -> int:
                                 signal, evaluation.market, settings
                             ),
                             price_range=service.price_range,
+                            market_context=service.market_context,
                             evaluated_at=now,
                         )
                         next_analysis = next_analysis_boundary(
@@ -546,6 +560,7 @@ def _apply_stream_events(
                 current = replace(
                     current,
                     live_technical=live_technical,
+                    market_context=service.market_context,
                     stream_status="LIVE",
                     stream_updated_at=event.received_at,
                 )

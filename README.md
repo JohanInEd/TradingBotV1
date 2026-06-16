@@ -37,6 +37,13 @@ WebSocket candle updates. Ticker price, bid, ask, and 24-hour change stream in
 real time, with REST polling retained as a stale-stream fallback. News and
 macro analysis refresh independently every ten minutes.
 
+The dashboard adds a market-context layer from 4-hour candles: ATR percent,
+realized volatility, Bollinger-band width, 50-candle range position, and
+20/50-period trend spread. It labels volatility and structure regimes such as
+compressed volatility, elevated volatility, trending up/down, or range
+compression. These values are context for interpreting conditions and do not
+change the established signal weights.
+
 In Binance USD-M mode, the dashboard also displays public derivatives context:
 mark and index price, perpetual basis, funding rate and countdown, open
 interest, and the global long/short account ratio. These metrics are currently
@@ -192,6 +199,7 @@ The bot is organized as a small Python package with these responsibilities:
 - `strategy.py`: weighted tri-factor score and final signal classification.
 - `futures.py`: long/short/flat guidance and risk-based paper sizing.
 - `microstructure.py`: rolling order-book, taker-flow, liquidation, and open-interest shakeout risk.
+- `market_context.py`: volatility regime, range position, and trend/range context.
 - `app.py`: evaluation scheduling and service orchestration.
 - `dashboard.py`: Rich terminal dashboard and static report.
 - `models.py`: immutable analysis and evaluation data models.

@@ -209,6 +209,7 @@ class WebStateService:
                         signal, evaluation.market, self.settings
                     ),
                     price_range=self.service.price_range,
+                    market_context=self.service.market_context,
                     evaluated_at=now,
                 )
                 self._next_analysis = next_analysis_boundary(

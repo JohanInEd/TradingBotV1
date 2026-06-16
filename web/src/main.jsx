@@ -2,29 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
 
-const improvementIdeas = [
-  {
-    title: "Backtest the tri-factor weights",
-    text: "Store every evaluation and compare 40/30/30 against walk-forward alternatives before changing thresholds."
-  },
-  {
-    title: "Add volatility-aware risk",
-    text: "Size paper futures from ATR or realized volatility instead of a fixed stop percentage."
-  },
-  {
-    title: "Explain every signal",
-    text: "Attach a short reason chain that names which timeframe, headline group, and macro condition moved the score."
-  },
-  {
-    title: "Persist news and market state",
-    text: "Save snapshots to SQLite so the dashboard can show history, outages, and signal drift after restarts."
-  },
-  {
-    title: "Add alert channels",
-    text: "Send only confirmed LONG/SHORT transitions to Telegram, Discord, or email with cooldown rules."
-  }
-];
-
 function App() {
   const [snapshot, setSnapshot] = useState(null);
   const [connection, setConnection] = useState("connecting");
@@ -101,6 +78,7 @@ function App() {
   const futures = evaluation?.futures;
   const futuresMetrics = evaluation?.futures_metrics;
   const priceRange = evaluation?.price_range;
+  const marketContext = evaluation?.market_context;
   const shakeout = evaluation?.shakeout;
 
   const allHeadlines = useMemo(() => {
@@ -153,6 +131,12 @@ function App() {
                 tone="neutral"
               />
               <MetricCard
+                label="Market Regime"
+                value={marketContext?.volatility_regime ?? "WAITING"}
+                detail={`${marketContext?.structure_regime ?? "Closed candle context"} - ATR ${formatPct(marketContext?.atr_percent)}`}
+                tone={marketContext?.volatility_regime === "HIGH VOLATILITY" ? "negative" : marketContext?.volatility_regime === "ELEVATED VOLATILITY" ? "warning" : "neutral"}
+              />
+              <MetricCard
                 label="Shakeout Risk"
                 value={shakeout?.status ?? "WAITING"}
                 detail={`${shakeout?.direction ?? "Microstructure stream"} - ${formatNumber(shakeout?.score, 2)}`}
@@ -167,7 +151,7 @@ function App() {
 
             <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
               <HealthPanel evaluation={evaluation} />
-              <IdeasPanel />
+              <MarketContextPanel marketContext={marketContext} />
             </section>
           </>
         )}
@@ -370,18 +354,25 @@ function HealthPanel({ evaluation }) {
   );
 }
 
-function IdeasPanel() {
+function MarketContextPanel({ marketContext }) {
   return (
     <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
-      <h2 className="text-xl font-semibold">Improvement Ideas</h2>
-      <div className="mt-5 grid gap-3 md:grid-cols-2">
-        {improvementIdeas.map((idea) => (
-          <article key={idea.title} className="rounded-2xl border border-white/10 bg-black/20 p-4">
-            <p className="font-medium text-cyan-100">{idea.title}</p>
-            <p className="mt-2 text-sm text-slate-400">{idea.text}</p>
-          </article>
-        ))}
-      </div>
+      <h2 className="text-xl font-semibold">Market Context</h2>
+      {marketContext ? (
+        <>
+          <p className="mt-2 text-sm text-slate-400">{marketContext.reason}</p>
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            <MiniStat label="Volatility" value={marketContext.volatility_regime} />
+            <MiniStat label="Structure" value={marketContext.structure_regime} />
+            <MiniStat label="ATR percent" value={formatPct(marketContext.atr_percent)} />
+            <MiniStat label="Realized vol" value={formatPct(marketContext.realized_volatility_percent)} />
+            <MiniStat label="Band width" value={formatPct(marketContext.bollinger_width_percent)} />
+            <MiniStat label="Range position" value={formatPct(marketContext.range_position_percent, 0)} />
+          </div>
+        </>
+      ) : (
+        <p className="mt-5 rounded-2xl bg-black/20 p-4 text-sm text-slate-400">Waiting for completed candle history.</p>
+      )}
     </section>
   );
 }

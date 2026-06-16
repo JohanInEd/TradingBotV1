@@ -131,6 +131,19 @@ class PriceRangeForecast:
 
 
 @dataclass(frozen=True, slots=True)
+class MarketContext:
+    volatility_regime: str
+    structure_regime: str
+    atr_percent: float
+    realized_volatility_percent: float
+    bollinger_width_percent: float
+    range_position_percent: float
+    trend_strength_percent: float
+    reason: str
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ShakeoutAnalysis:
     status: str
     direction: str
@@ -168,6 +181,7 @@ class Evaluation:
     futures: FuturesRecommendation | None = None
     futures_metrics: FuturesMetrics | None = None
     price_range: PriceRangeForecast | None = None
+    market_context: MarketContext | None = None
     shakeout: ShakeoutAnalysis | None = None
     market_health: RefreshHealth = field(default_factory=RefreshHealth)
     futures_health: RefreshHealth = field(default_factory=RefreshHealth)

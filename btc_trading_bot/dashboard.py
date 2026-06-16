@@ -33,7 +33,7 @@ def build_dashboard(evaluation: Evaluation) -> Layout:
     layout["right"].split_column(
         Layout(_sentiment_panel(evaluation), name="sentiment", ratio=1),
         Layout(_macro_panel(evaluation), name="macro", ratio=1),
-        Layout(_shakeout_panel(evaluation), name="shakeout", size=9),
+        Layout(_shakeout_panel(evaluation), name="shakeout", size=12),
     )
     return layout
 
@@ -293,6 +293,7 @@ def _shakeout_panel(evaluation: Evaluation) -> Panel:
     table.add_row("Status", shakeout.status, style=style)
     table.add_row("Direction", shakeout.direction)
     table.add_row("Score", f"{shakeout.score:.2f}")
+    table.add_row("Signal context", _shakeout_signal_context(evaluation))
     if shakeout.order_book_imbalance is not None:
         table.add_row("Book imbalance", f"{shakeout.order_book_imbalance:+.2f}")
     if shakeout.bid_depth_usd is not None and shakeout.ask_depth_usd is not None:
@@ -310,6 +311,11 @@ def _shakeout_panel(evaluation: Evaluation) -> Panel:
     )
     if shakeout.open_interest_change_percent is not None:
         table.add_row("OI change", f"{shakeout.open_interest_change_percent:+.2f}%")
+    stress = _shakeout_stress_line(shakeout)
+    if stress:
+        table.add_row("Vs baseline", stress)
+    if shakeout.stream_health:
+        table.add_row("Streams", _stream_health_line(shakeout.stream_health))
     table.add_row("Reason", shakeout.reason)
     return Panel(
         table,
@@ -421,6 +427,47 @@ def _signal_panel(evaluation: Evaluation) -> Panel:
         border_style=_score_style(signal.score),
         box=box.DOUBLE,
     )
+
+
+def _shakeout_signal_context(evaluation: Evaluation) -> str:
+    shakeout = evaluation.shakeout
+    if shakeout is None or shakeout.status == "CALM":
+        return "Context only; no shakeout pressure against the main signal."
+    signal = evaluation.signal.signal
+    if "UPSIDE" in shakeout.direction:
+        risk_side = "BUY"
+    elif "DOWNSIDE" in shakeout.direction:
+        risk_side = "SELL"
+    else:
+        return f"Context only; two-sided risk while signal is {signal}."
+    if signal == "STRONG BUY" and risk_side == "BUY":
+        return "Context only; agrees with the bullish main signal."
+    if signal == "STRONG SELL" and risk_side == "SELL":
+        return "Context only; agrees with the bearish main signal."
+    if signal in {"STRONG BUY", "STRONG SELL"}:
+        return f"Context only; conflicts with the {signal} main signal."
+    return "Context only; main signal is neutral, so this is not a trigger."
+
+
+def _shakeout_stress_line(shakeout) -> str:
+    parts: list[str] = []
+    for label, value in (
+        ("Depth", shakeout.depth_stress_ratio),
+        ("Flow", shakeout.taker_flow_stress_ratio),
+        ("Large", shakeout.large_trade_stress_ratio),
+        ("Liq", shakeout.liquidation_stress_ratio),
+    ):
+        if value is not None:
+            parts.append(f"{label} {value:.1f}x")
+    return "  ".join(parts)
+
+
+def _stream_health_line(streams) -> str:
+    parts: list[str] = []
+    for stream in streams:
+        age = "-" if stream.last_event_age_seconds is None else f"{stream.last_event_age_seconds:.0f}s"
+        parts.append(f"{stream.name}:{stream.status} {age}/{stream.event_count}")
+    return "  ".join(parts)
 
 
 def _headline_line(headline: Headline, include_score: bool) -> Text:

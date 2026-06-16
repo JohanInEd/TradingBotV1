@@ -49,9 +49,11 @@ mark and index price, perpetual basis, funding rate and countdown, open
 interest, and the global long/short account ratio. These metrics are currently
 confirmation context and do not alter the established 40/30/30 signal weights.
 It also listens to public order-book depth, aggregate trades, and liquidation
-events to estimate live shakeout-risk context. This is an alerting layer for
-possible upside squeezes or downside stop runs, not a prediction guarantee and
-not a trade trigger by itself.
+events to estimate live shakeout-risk context. Depth, taker flow, large trades,
+and liquidation stress are compared with recent rolling baselines and fade with
+freshness decay instead of dropping out abruptly at the window edge. This is an
+alerting layer for possible upside squeezes or downside stop runs, not a
+prediction guarantee and not a trade trigger by itself.
 
 ## Install
 
@@ -161,6 +163,7 @@ After `web/dist` exists, `btc-tri-factor-web` serves the built interface from
 | `BOT_PRICE_RANGE_HORIZON_HOURS` | `24` | Historical low/high estimate horizon |
 | `BOT_PRICE_RANGE_LOOKBACK_CANDLES` | `180` | Recent 4h candles used for range samples |
 | `BOT_SHAKEOUT_WINDOW_SECONDS` | `300` | Rolling window for order-flow and liquidation stress |
+| `BOT_SHAKEOUT_BASELINE_WINDOW_SECONDS` | `3600` | Recent history used to normalize shakeout stress against local baselines |
 | `BOT_WHALE_TRADE_USD` | `1000000` | Minimum notional for a large taker trade alert |
 | `BOT_SHAKEOUT_EVENT_LOG` | unset | Optional JSONL file for recording shakeout inputs and replay analysis |
 
@@ -173,14 +176,19 @@ $env:BOT_SHAKEOUT_EVENT_LOG = "data/shakeout-events.jsonl"
 btc-tri-factor-web
 ```
 
-Replay the file with the same monitor logic:
+Replay the file with the current monitor logic and compare it with recorded
+baseline summaries embedded in the JSONL:
 
 ```powershell
 btc-shakeout-backtest data/shakeout-events.jsonl
 ```
 
-The replay summarizes observed risk states and peak score. It does not change
-the live signal matrix and does not create trade triggers.
+The replay summarizes current risk states, average score, peak score, peak
+reason, and, when available, the original recorded status/score summary plus
+the peak-score delta. Use `--window-seconds`, `--baseline-window-seconds`, or
+`--whale-trade-usd` to compare alternate shakeout-scoring assumptions. The
+replay does not change the live signal matrix and does not create trade
+triggers.
 
 ## Test
 
@@ -232,9 +240,12 @@ top-of-book depth, aggregate market trades, and force-liquidation snapshots.
 The shakeout monitor scores visible stress from thin bid/ask liquidity,
 aggressive taker flow, large notional trades, liquidation bursts, open-interest
 changes, and top-trader long/short crowding. Reason text includes the measured
-driver, such as net taker flow over the rolling window or visible bid/ask depth
-skew. Public order books can be spoofed and do not identify wallets, so the
-output is treated as risk context rather than proof of whale intent.
+driver, baseline comparison where available, and whether the risk context
+agrees or conflicts with the main closed-candle signal. The terminal and web
+dashboards also show separate depth, aggregate-trade, and force-liquidation
+stream health with event counts and last-event age. Public order books can be
+spoofed and do not identify wallets, so the output is treated as risk context
+rather than proof of whale intent.
 
 The header reports independent Market, Futures, and News refresh health. Each
 source shows its current state, age of the last successful update, and next
@@ -249,8 +260,8 @@ The current test suite covers indicators, multi-timeframe scoring, confirmation
 gating, live ticker normalization, provisional candle merging, stale-stream
 fallback, independent news updates, strategy weighting, futures guidance, risk
 sizing, news analysis, Binance USD-M market resolution, concurrent RSS fetches,
-futures-specific indicators, refresh-health transitions, and Windows console
-encoding. At the time this context was recorded, all 28 tests passed.
+futures-specific indicators, shakeout replay and stream-health behavior,
+refresh-health transitions, and Windows console encoding.
 
 ## Risk Notice
 

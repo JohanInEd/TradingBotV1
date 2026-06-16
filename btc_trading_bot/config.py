@@ -73,6 +73,7 @@ class Settings:
     price_range_horizon_hours: int = 24
     price_range_lookback_candles: int = 180
     shakeout_window_seconds: int = 300
+    shakeout_baseline_window_seconds: int = 3600
     whale_trade_usd: float = 1_000_000.0
     shakeout_event_log_path: Path | None = None
     feeds: tuple[NewsFeed, ...] = field(default_factory=lambda: DEFAULT_FEEDS)
@@ -118,6 +119,12 @@ class Settings:
             ),
             shakeout_window_seconds=_env_int(
                 "BOT_SHAKEOUT_WINDOW_SECONDS", 300, minimum=60, maximum=1800
+            ),
+            shakeout_baseline_window_seconds=_env_int(
+                "BOT_SHAKEOUT_BASELINE_WINDOW_SECONDS",
+                3600,
+                minimum=300,
+                maximum=14_400,
             ),
             whale_trade_usd=_env_float(
                 "BOT_WHALE_TRADE_USD", 1_000_000.0, minimum=10_000.0

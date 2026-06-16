@@ -144,6 +144,15 @@ class MarketContext:
 
 
 @dataclass(frozen=True, slots=True)
+class MicrostructureStreamHealth:
+    name: str
+    status: str
+    event_count: int
+    last_event_at: datetime | None
+    last_event_age_seconds: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class ShakeoutAnalysis:
     status: str
     direction: str
@@ -162,6 +171,11 @@ class ShakeoutAnalysis:
     top_trader_long_short_ratio: float | None
     reason: str
     updated_at: datetime | None = None
+    depth_stress_ratio: float | None = None
+    taker_flow_stress_ratio: float | None = None
+    large_trade_stress_ratio: float | None = None
+    liquidation_stress_ratio: float | None = None
+    stream_health: tuple[MicrostructureStreamHealth, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)

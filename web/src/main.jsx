@@ -139,7 +139,7 @@ function App() {
               <MetricCard
                 label="Shakeout Risk"
                 value={shakeout?.status ?? "WAITING"}
-                detail={`${shakeout?.direction ?? "Microstructure stream"} - ${formatNumber(shakeout?.score, 2)}`}
+                detail={`${shakeout?.direction ?? "Microstructure stream"} - ${formatNumber(shakeout?.score, 2)} - ${shakeoutSignalContext(shakeout, signal)}`}
                 tone={shakeout?.status === "HIGH" ? "negative" : shakeout?.status === "MEDIUM" ? "warning" : "neutral"}
               />
             </section>
@@ -205,6 +205,7 @@ function MetricCard({ label, value, detail, tone }) {
 
 function SignalPanel({ evaluation, futures, futuresMetrics, priceRange, shakeout }) {
   const technical = evaluation.live_technical ?? evaluation.technical;
+  const shakeoutContext = shakeoutSignalContext(shakeout, evaluation.signal);
   return (
     <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
       <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
@@ -255,6 +256,7 @@ function SignalPanel({ evaluation, futures, futuresMetrics, priceRange, shakeout
                 {shakeout.status} - {shakeout.direction}
               </p>
               <p className="mt-2 text-sm text-slate-300">{shakeout.reason}</p>
+              <p className="mt-2 text-xs uppercase tracking-[0.18em] text-amber-100">{shakeoutContext}</p>
             </div>
             <div className="grid min-w-64 grid-cols-2 gap-2 rounded-xl bg-black/20 p-3 text-sm text-slate-300">
               <MiniLine label="Score" value={formatNumber(shakeout.score, 2)} />
@@ -267,6 +269,25 @@ function SignalPanel({ evaluation, futures, futuresMetrics, priceRange, shakeout
               <MiniLine label="Liq sell" value={formatCompactUsd(shakeout.liquidation_sell_usd)} />
               <MiniLine label="Large trades" value={shakeout.large_trade_count} />
               <MiniLine label="OI change" value={formatPct(shakeout.open_interest_change_percent)} />
+            </div>
+          </div>
+          <div className="mt-4 grid gap-2 md:grid-cols-2">
+            <div className="rounded-xl bg-black/20 p-3 text-sm text-slate-300">
+              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Vs rolling baseline</p>
+              <MiniLine label="Depth" value={formatRatio(shakeout.depth_stress_ratio)} />
+              <MiniLine label="Taker flow" value={formatRatio(shakeout.taker_flow_stress_ratio)} />
+              <MiniLine label="Large trades" value={formatRatio(shakeout.large_trade_stress_ratio)} />
+              <MiniLine label="Liquidations" value={formatRatio(shakeout.liquidation_stress_ratio)} />
+            </div>
+            <div className="rounded-xl bg-black/20 p-3 text-sm text-slate-300">
+              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Stream health</p>
+              {(shakeout.stream_health ?? []).map((stream) => (
+                <MiniLine
+                  key={stream.name}
+                  label={stream.name}
+                  value={`${stream.status} - ${formatAgeSeconds(stream.last_event_age_seconds)} - ${stream.event_count}`}
+                />
+              ))}
             </div>
           </div>
         </div>
@@ -438,6 +459,40 @@ function formatPct(value, digits = 2) {
 function formatNumber(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
   return Number(value).toFixed(digits);
+}
+
+function formatRatio(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  return `${Number(value).toFixed(1)}x`;
+}
+
+function formatAgeSeconds(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  const seconds = Math.max(0, Number(value));
+  if (seconds < 60) return `${seconds.toFixed(0)}s`;
+  return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+}
+
+function shakeoutSignalContext(shakeout, signal) {
+  if (!shakeout) return "Waiting for context";
+  if (shakeout.status === "CALM") return "Context only";
+  const mainSignal = signal?.signal ?? "HOLD / NEUTRAL";
+  const riskSide = shakeout.direction?.includes("UPSIDE")
+    ? "BUY"
+    : shakeout.direction?.includes("DOWNSIDE")
+      ? "SELL"
+      : null;
+  if (!riskSide) return `Context only; two-sided while signal is ${mainSignal}`;
+  if (mainSignal === "STRONG BUY" && riskSide === "BUY") {
+    return "Context only; agrees with signal";
+  }
+  if (mainSignal === "STRONG SELL" && riskSide === "SELL") {
+    return "Context only; agrees with signal";
+  }
+  if (mainSignal === "STRONG BUY" || mainSignal === "STRONG SELL") {
+    return "Context only; conflicts with signal";
+  }
+  return "Context only; neutral signal";
 }
 
 function formatTime(value) {

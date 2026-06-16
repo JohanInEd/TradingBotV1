@@ -169,9 +169,11 @@ def test_console_encoding_replaces_unsupported_characters(monkeypatch) -> None:
 
 def test_shakeout_event_log_path_reads_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("BOT_SHAKEOUT_EVENT_LOG", "logs/shakeout.jsonl")
+    monkeypatch.setenv("BOT_SHAKEOUT_BASELINE_WINDOW_SECONDS", "1200")
 
     settings = Settings.from_env()
 
     assert settings.shakeout_event_log_path is not None
     assert settings.shakeout_event_log_path.name == "shakeout.jsonl"
     assert settings.shakeout_event_log_path.parent.name == "logs"
+    assert settings.shakeout_baseline_window_seconds == 1200

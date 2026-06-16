@@ -95,6 +95,40 @@ This resolves the default `BTC/USDT` setting to CCXT's linear perpetual symbol
 `BTC/USDT:USDT` in both REST and WebSocket clients. It reads public Binance
 USD-M data and produces paper guidance; it does not submit orders.
 
+## Web Dashboard
+
+The project also includes a React and Tailwind dashboard for live price, news,
+macro risk, signal, and paper futures context. Start the Python live API:
+
+```powershell
+$env:BOT_EXCHANGE = "binance-usdm"
+btc-tri-factor-web
+```
+
+Then run the React development server in a second terminal:
+
+```powershell
+cd web
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. The Vite dev server proxies `/api` requests to
+the Python service on `http://127.0.0.1:8765`.
+
+For a production-style local build:
+
+```powershell
+cd web
+npm run build
+cd ..
+btc-tri-factor-web
+```
+
+After `web/dist` exists, `btc-tri-factor-web` serves the built interface from
+`http://127.0.0.1:8765`. Live updates use server-sent events at
+`/api/stream`, with `/api/snapshot` available for the current JSON state.
+
 ## Configuration
 
 | Environment variable | Default | Description |
@@ -113,6 +147,8 @@ USD-M data and produces paper guidance; it does not submit orders.
 | `BOT_REWARD_TO_RISK` | `2.0` | Take-profit distance relative to stop |
 | `BOT_FUTURES_LEVERAGE` | `1` | Paper leverage, capped at 3 |
 | `BOT_MAX_POSITION_FRACTION` | `0.25` | Maximum margin allocation |
+| `BOT_PRICE_RANGE_HORIZON_HOURS` | `24` | Historical low/high estimate horizon |
+| `BOT_PRICE_RANGE_LOOKBACK_CANDLES` | `180` | Recent 4h candles used for range samples |
 
 ## Test
 
@@ -152,6 +188,10 @@ existing REST client resumes polling. RSS news refreshes in a dedicated worker,
 with publishers fetched concurrently so one slow feed cannot delay every other
 source. A completed refresh immediately recalculates the signal while preserving
 the last valid news analysis during a temporary feed outage.
+
+The evaluation also estimates a historical low/high range for the next 24 hours
+by reviewing prior forward windows from recent 4-hour candles. This is a
+probabilistic support/resistance context, not a guaranteed forecast.
 
 The header reports independent Market, Futures, and News refresh health. Each
 source shows its current state, age of the last successful update, and next

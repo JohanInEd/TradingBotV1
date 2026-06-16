@@ -69,6 +69,8 @@ class Settings:
     reward_to_risk: float = 2.0
     futures_leverage: int = 1
     max_position_fraction: float = 0.25
+    price_range_horizon_hours: int = 24
+    price_range_lookback_candles: int = 180
     feeds: tuple[NewsFeed, ...] = field(default_factory=lambda: DEFAULT_FEEDS)
 
     @classmethod
@@ -103,6 +105,12 @@ class Settings:
             ),
             max_position_fraction=_env_float(
                 "BOT_MAX_POSITION_FRACTION", 0.25, minimum=0.01, maximum=1.0
+            ),
+            price_range_horizon_hours=_env_int(
+                "BOT_PRICE_RANGE_HORIZON_HOURS", 24, minimum=4, maximum=168
+            ),
+            price_range_lookback_candles=_env_int(
+                "BOT_PRICE_RANGE_LOOKBACK_CANDLES", 180, minimum=60, maximum=1000
             ),
         )
 

@@ -24,6 +24,7 @@ dev = ["pytest>=8,<10"]
 
 [project.scripts]
 btc-tri-factor = "btc_trading_bot.app:main"
+btc-tri-factor-web = "btc_trading_bot.web:main"
 
 [tool.setuptools.packages.find]
 include = ["btc_trading_bot*"]

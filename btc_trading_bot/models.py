@@ -116,6 +116,21 @@ class FuturesRecommendation:
 
 
 @dataclass(frozen=True, slots=True)
+class PriceRangeForecast:
+    horizon_hours: int
+    expected_low: float
+    expected_high: float
+    support_level: float
+    resistance_level: float
+    downside_percent: float
+    upside_percent: float
+    confidence: str
+    sample_size: int
+    method: str
+    generated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Evaluation:
     market: MarketSnapshot
     technical: TechnicalAnalysis
@@ -131,6 +146,7 @@ class Evaluation:
     stream_updated_at: datetime | None = None
     futures: FuturesRecommendation | None = None
     futures_metrics: FuturesMetrics | None = None
+    price_range: PriceRangeForecast | None = None
     market_health: RefreshHealth = field(default_factory=RefreshHealth)
     futures_health: RefreshHealth = field(default_factory=RefreshHealth)
     news_health: RefreshHealth = field(default_factory=RefreshHealth)

@@ -290,6 +290,25 @@ def _signal_panel(evaluation: Evaluation) -> Panel:
                 justify="center",
             )
         )
+    if evaluation.price_range is not None:
+        price_range = evaluation.price_range
+        range_line = Text(justify="center")
+        range_line.append(
+            f"{price_range.horizon_hours}h historical range: ",
+            style="bold cyan",
+        )
+        range_line.append(
+            f"Low ${price_range.expected_low:,.2f}"
+            f" ({price_range.downside_percent:+.2f}%)"
+            f" | High ${price_range.expected_high:,.2f}"
+            f" ({price_range.upside_percent:+.2f}%)",
+            style="bold",
+        )
+        range_line.append(
+            f" | Confidence {price_range.confidence}",
+            style="dim",
+        )
+        content.append(range_line)
     if evaluation.errors:
         content.append(
             Text(

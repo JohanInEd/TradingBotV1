@@ -36,6 +36,7 @@ from btc_trading_bot.news import (
     neutral_macro,
     neutral_sentiment,
 )
+from btc_trading_bot.price_range import PriceRangeSettings, forecast_price_range
 from btc_trading_bot.realtime import RealtimeMarketStream, StreamEvent
 from btc_trading_bot.strategy import calculate_signal
 
@@ -48,6 +49,7 @@ class BotService:
         self.exchange = ExchangeClient(settings)
         self.news = NewsAnalyzer(settings)
         self._live_candles: dict[str, Any] = {}
+        self._price_range = None
 
     def evaluate(self, market: MarketSnapshot | None = None) -> Evaluation:
         errors: list[str] = []
@@ -81,6 +83,7 @@ class BotService:
             errors=tuple(errors),
             news_updated_at=evaluated_at if news_succeeded else None,
             futures_metrics=futures_metrics,
+            price_range=self._price_range,
             market_health=RefreshHealth(
                 status="OK",
                 last_success_at=market.timestamp,
@@ -115,7 +118,19 @@ class BotService:
             self.settings.daily_timeframe: daily_candles.copy(),
             self.settings.entry_timeframe: hourly_candles.copy(),
         }
+        self._price_range = forecast_price_range(
+            four_hour_candles,
+            PriceRangeSettings(
+                horizon_hours=self.settings.price_range_horizon_hours,
+                horizon_candles=max(1, self.settings.price_range_horizon_hours // 4),
+                lookback_candles=self.settings.price_range_lookback_candles,
+            ),
+        )
         return self._analyze_candles(self._live_candles)
+
+    @property
+    def price_range(self):
+        return self._price_range
 
     def apply_live_candle(
         self, timeframe: str, row: list[Any] | tuple[Any, ...]
@@ -275,6 +290,7 @@ def run(settings: Settings, once: bool = False) -> int:
                             futures=build_futures_recommendation(
                                 signal, evaluation.market, settings
                             ),
+                            price_range=service.price_range,
                             evaluated_at=now,
                         )
                         next_analysis = next_analysis_boundary(

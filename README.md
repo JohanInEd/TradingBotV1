@@ -142,6 +142,16 @@ After `web/dist` exists, `btc-tri-factor-web` serves the built interface from
 `http://127.0.0.1:8765`. Live updates use server-sent events at
 `/api/stream`, with `/api/snapshot` available for the current JSON state.
 
+The dashboard includes a BTC Long / Short Map for visual trade context. It
+draws recent 4-hour candles with EMA 20/50, VWAP, Bollinger bands,
+support/resistance, the probabilistic 24-hour range, and a current
+`GO LONG`, `GO SHORT`, or `STAY FLAT` marker. Indicator panels below the price
+chart show RSI 14, MACD histogram, ADX 14, and volume. A Long / Short / Flat
+meter summarizes the current directional bias from the existing signal and
+paper futures guidance. This chart is designed to make confirmation and risk
+context easier to read; it does not make predictions with certainty and does
+not place trades.
+
 ## Configuration
 
 | Environment variable | Default | Description |
@@ -202,7 +212,7 @@ The bot is organized as a small Python package with these responsibilities:
 
 - `exchange.py`: public CCXT ticker, closed candles, and stream normalization.
 - `realtime.py`: background CCXT Pro ticker and OHLCV WebSocket subscriptions.
-- `indicators.py`: 4-hour technical analysis and multi-timeframe scoring.
+- `indicators.py`: 4-hour technical analysis, multi-timeframe scoring, and chart-ready indicator series.
 - `news.py`: Bitcoin sentiment and macro-risk analysis.
 - `strategy.py`: weighted tri-factor score and final signal classification.
 - `futures.py`: long/short/flat guidance and risk-based paper sizing.
@@ -210,6 +220,7 @@ The bot is organized as a small Python package with these responsibilities:
 - `market_context.py`: volatility regime, range position, and trend/range context.
 - `app.py`: evaluation scheduling and service orchestration.
 - `dashboard.py`: Rich terminal dashboard and static report.
+- `web.py`: React dashboard API, server-sent events, static serving, and chart payloads.
 - `models.py`: immutable analysis and evaluation data models.
 
 The technical factor now combines:
@@ -230,6 +241,12 @@ existing REST client resumes polling. RSS news refreshes in a dedicated worker,
 with publishers fetched concurrently so one slow feed cannot delay every other
 source. A completed refresh immediately recalculates the signal while preserving
 the last valid news analysis during a temporary feed outage.
+
+The web snapshot also exposes compact chart data from the current 4-hour candle
+set. Each row includes OHLCV plus EMA 20/50, VWAP, Bollinger bands, RSI 14,
+MACD, MACD signal, MACD histogram, and ADX 14 values. The React dashboard uses
+this payload to render the Long / Short Map without requiring a separate chart
+API or third-party charting package.
 
 The evaluation also estimates a historical low/high range for the next 24 hours
 by reviewing prior forward windows from recent 4-hour candles. This is a

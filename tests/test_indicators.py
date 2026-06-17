@@ -3,7 +3,11 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
-from btc_trading_bot.indicators import analyze_multi_timeframe, analyze_technicals
+from btc_trading_bot.indicators import (
+    analyze_multi_timeframe,
+    analyze_technicals,
+    build_chart_indicators,
+)
 
 
 def _candles(closes: list[float], hours: int = 4) -> pd.DataFrame:
@@ -14,7 +18,11 @@ def _candles(closes: list[float], hours: int = 4) -> pd.DataFrame:
                 start + timedelta(hours=hours * index)
                 for index in range(len(closes))
             ],
+            "open": [close - 50 for close in closes],
+            "high": [close + 100 for close in closes],
+            "low": [close - 100 for close in closes],
             "close": closes,
+            "volume": [100 + index for index in range(len(closes))],
         }
     )
 
@@ -60,3 +68,20 @@ def test_multi_timeframe_analysis_combines_all_three_scores() -> None:
         + result.daily_trend.score * 0.25
         + result.hourly_entry.score * 0.15
     )
+
+
+def test_chart_indicators_include_overlay_and_panel_values() -> None:
+    closes = [50_000 + index * 80 for index in range(100)]
+
+    rows = build_chart_indicators(_candles(closes), limit=80)
+
+    assert len(rows) == 80
+    latest = rows[-1]
+    assert latest["ema20"] is not None
+    assert latest["ema50"] is not None
+    assert latest["vwap"] is not None
+    assert latest["bollinger_high"] is not None
+    assert latest["bollinger_low"] is not None
+    assert latest["rsi14"] is not None
+    assert latest["macd_histogram"] is not None
+    assert latest["adx14"] is not None

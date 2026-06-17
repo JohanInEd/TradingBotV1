@@ -20,7 +20,7 @@ from btc_trading_bot.exchange import (
     merge_candle_update,
 )
 from btc_trading_bot.futures import build_futures_recommendation
-from btc_trading_bot.indicators import analyze_multi_timeframe
+from btc_trading_bot.indicators import analyze_multi_timeframe, build_chart_indicators
 from btc_trading_bot.market_context import analyze_market_context
 from btc_trading_bot.models import (
     Evaluation,
@@ -150,6 +150,15 @@ class BotService:
     @property
     def market_context(self):
         return self._market_context
+
+    def chart_data(self, limit: int = 120) -> dict[str, Any]:
+        candles = self._live_candles.get(self.settings.timeframe)
+        if candles is None:
+            return {"timeframe": self.settings.timeframe, "candles": []}
+        return {
+            "timeframe": self.settings.timeframe,
+            "candles": build_chart_indicators(candles, limit=limit),
+        }
 
     def apply_live_candle(
         self, timeframe: str, row: list[Any] | tuple[Any, ...]

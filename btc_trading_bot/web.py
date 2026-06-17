@@ -164,6 +164,7 @@ class WebStateService:
             "version": self._version,
             "status": "ok",
             "evaluation": _jsonable(self._evaluation),
+            "chart": _jsonable(self.service.chart_data()),
             "generated_at": _jsonable(datetime.now(timezone.utc)),
         }
 

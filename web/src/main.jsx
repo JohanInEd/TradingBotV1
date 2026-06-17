@@ -71,6 +71,7 @@ function App() {
   }, []);
 
   const evaluation = snapshot?.evaluation;
+  const chart = snapshot?.chart;
   const market = evaluation?.market;
   const signal = evaluation?.signal;
   const sentiment = evaluation?.sentiment;
@@ -144,6 +145,8 @@ function App() {
               />
             </section>
 
+            <DecisionChart evaluation={evaluation} chart={chart} />
+
             <section className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
               <SignalPanel evaluation={evaluation} futures={futures} futuresMetrics={futuresMetrics} priceRange={priceRange} shakeout={shakeout} />
               <NewsPanel headlines={allHeadlines} />
@@ -157,6 +160,342 @@ function App() {
         )}
       </div>
     </main>
+  );
+}
+
+function DecisionChart({ evaluation, chart }) {
+  const candles = useMemo(
+    () => (chart?.candles ?? []).filter((candle) => isFiniteNumber(candle.close)),
+    [chart]
+  );
+  const technical = evaluation.live_technical ?? evaluation.technical;
+  const decision = useMemo(() => buildDecision(evaluation), [evaluation]);
+
+  if (!candles.length) {
+    return (
+      <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
+        <h2 className="text-xl font-semibold">BTC Long / Short Map</h2>
+        <p className="mt-4 rounded-2xl bg-black/20 p-4 text-sm text-slate-400">
+          Waiting for candle history before drawing the decision map.
+        </p>
+      </section>
+    );
+  }
+
+  const latest = candles[candles.length - 1];
+  const currentPrice = evaluation.market?.price ?? latest.close;
+  const priceRange = evaluation.price_range;
+  const futuresMetrics = evaluation.futures_metrics;
+  const shakeout = evaluation.shakeout;
+
+  return (
+    <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h2 className="text-xl font-semibold">BTC Long / Short Map</h2>
+          <p className="mt-1 text-sm text-slate-400">
+            {chart?.timeframe ?? "4h"} candles with trend, momentum, volatility, volume, and futures pressure.
+          </p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-3 lg:min-w-[30rem]">
+          <DecisionGauge label="Long" value={decision.long} tone="positive" />
+          <DecisionGauge label="Short" value={decision.short} tone="negative" />
+          <DecisionGauge label="Flat" value={decision.flat} tone="neutral" />
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_21rem]">
+        <div className="rounded-2xl bg-black/20 p-4">
+          <PriceDecisionSvg
+            candles={candles}
+            currentPrice={currentPrice}
+            priceRange={priceRange}
+            decision={decision}
+          />
+          <div className="mt-4 grid gap-2 text-xs text-slate-400 sm:grid-cols-3 lg:grid-cols-6">
+            <LegendItem color="bg-emerald-300" label="EMA 20" />
+            <LegendItem color="bg-cyan-300" label="EMA 50" />
+            <LegendItem color="bg-amber-200" label="VWAP" />
+            <LegendItem color="bg-violet-300" label="Bollinger" />
+            <LegendItem color="bg-slate-300" label="Support / resistance" />
+            <LegendItem color={decision.markerClass} label={decision.bias} />
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Current bias</p>
+            <p className={`mt-2 text-3xl font-semibold ${decision.textClass}`}>{decision.bias}</p>
+            <p className="mt-2 text-sm text-slate-300">{decision.reason}</p>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <MiniStat label="RSI 14" value={formatNumber(technical.rsi14, 1)} />
+            <MiniStat label="ADX 14" value={formatNumber(latest.adx14, 1)} />
+            <MiniStat label="MACD hist" value={formatNumber(technical.macd_histogram, 1)} />
+            <MiniStat label="Score" value={formatNumber(evaluation.signal.score, 3)} />
+          </div>
+          <div className="rounded-2xl bg-black/20 p-4 text-sm text-slate-300">
+            <MiniLine label="Live price" value={formatUsd(currentPrice)} />
+            <MiniLine label="Support" value={formatUsd(priceRange?.support_level)} />
+            <MiniLine label="Resistance" value={formatUsd(priceRange?.resistance_level)} />
+            <MiniLine label="Funding" value={formatPct((futuresMetrics?.funding_rate ?? 0) * 100, 4)} />
+            <MiniLine label="Open interest" value={formatCompactUsd(futuresMetrics?.open_interest_value)} />
+            <MiniLine label="Long/short" value={formatNumber(futuresMetrics?.long_short_ratio, 2)} />
+            <MiniLine label="Shakeout" value={`${shakeout?.status ?? "-"} ${shakeout?.direction ?? ""}`} />
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-4">
+        <IndicatorPanel
+          title="RSI"
+          candles={candles}
+          keys={["rsi14"]}
+          domain={[0, 100]}
+          guides={[30, 50, 70]}
+          colors={["#67e8f9"]}
+          formatter={(value) => formatNumber(value, 0)}
+        />
+        <IndicatorPanel
+          title="MACD"
+          candles={candles}
+          keys={["macd_histogram"]}
+          domain="auto"
+          colors={["#fbbf24"]}
+          histogram
+          formatter={(value) => formatNumber(value, 0)}
+        />
+        <IndicatorPanel
+          title="ADX"
+          candles={candles}
+          keys={["adx14"]}
+          domain={[0, 60]}
+          guides={[20, 25, 40]}
+          colors={["#a78bfa"]}
+          formatter={(value) => formatNumber(value, 0)}
+        />
+        <IndicatorPanel
+          title="Volume"
+          candles={candles}
+          keys={["volume"]}
+          domain={[0, Math.max(...candles.map((candle) => candle.volume ?? 0), 1)]}
+          colors={["#94a3b8"]}
+          histogram
+          formatter={(value) => formatCompact(value)}
+        />
+      </div>
+    </section>
+  );
+}
+
+function PriceDecisionSvg({ candles, currentPrice, priceRange, decision }) {
+  const width = 980;
+  const height = 410;
+  const margin = { top: 18, right: 78, bottom: 34, left: 68 };
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = height - margin.top - margin.bottom;
+  const priceValues = candles.flatMap((candle) => [
+    candle.high,
+    candle.low,
+    candle.ema20,
+    candle.ema50,
+    candle.vwap,
+    candle.bollinger_high,
+    candle.bollinger_low
+  ]);
+  priceValues.push(
+    currentPrice,
+    priceRange?.expected_low,
+    priceRange?.expected_high,
+    priceRange?.support_level,
+    priceRange?.resistance_level
+  );
+  const [minPrice, maxPrice] = paddedDomain(priceValues, 0.08);
+  const xFor = (index) => margin.left + (candles.length <= 1 ? 0 : (index / (candles.length - 1)) * innerWidth);
+  const yFor = (value) => margin.top + ((maxPrice - value) / (maxPrice - minPrice || 1)) * innerHeight;
+  const candleWidth = Math.max(3, Math.min(10, innerWidth / candles.length * 0.58));
+  const lineKeys = [
+    ["ema20", "#6ee7b7"],
+    ["ema50", "#67e8f9"],
+    ["vwap", "#fde68a"]
+  ];
+  const bollingerTop = seriesPath(candles, "bollinger_high", xFor, yFor);
+  const bollingerBottom = seriesPath([...candles].reverse(), "bollinger_low", (index) => xFor(candles.length - 1 - index), yFor);
+  const bandPath = bollingerTop && bollingerBottom ? `${bollingerTop} L ${bollingerBottom.slice(2)} Z` : "";
+  const latestX = xFor(candles.length - 1);
+  const markerY = yFor(currentPrice);
+  const markerColor = decision.side === "LONG" ? "#34d399" : decision.side === "SHORT" ? "#fb7185" : "#67e8f9";
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="h-auto w-full overflow-visible" role="img" aria-label="Bitcoin long short decision chart">
+      <rect x="0" y="0" width={width} height={height} rx="18" fill="rgba(2,6,23,0.42)" />
+      {[0.25, 0.5, 0.75].map((tick) => {
+        const y = margin.top + tick * innerHeight;
+        return <line key={tick} x1={margin.left} x2={width - margin.right} y1={y} y2={y} stroke="rgba(148,163,184,0.16)" />;
+      })}
+
+      {isFiniteNumber(priceRange?.expected_low) && isFiniteNumber(priceRange?.expected_high) ? (
+        <rect
+          x={margin.left}
+          y={yFor(priceRange.expected_high)}
+          width={innerWidth}
+          height={Math.max(2, yFor(priceRange.expected_low) - yFor(priceRange.expected_high))}
+          fill="rgba(34,211,238,0.07)"
+        />
+      ) : null}
+
+      {bandPath ? <path d={bandPath} fill="rgba(167,139,250,0.12)" stroke="rgba(167,139,250,0.35)" strokeWidth="1" /> : null}
+
+      {candles.map((candle, index) => {
+        const x = xFor(index);
+        const openY = yFor(candle.open ?? candle.close);
+        const closeY = yFor(candle.close);
+        const highY = yFor(candle.high ?? candle.close);
+        const lowY = yFor(candle.low ?? candle.close);
+        const bullish = candle.close >= (candle.open ?? candle.close);
+        const bodyY = Math.min(openY, closeY);
+        const bodyHeight = Math.max(2, Math.abs(openY - closeY));
+        const color = bullish ? "#34d399" : "#fb7185";
+        return (
+          <g key={candle.time}>
+            <line x1={x} x2={x} y1={highY} y2={lowY} stroke={color} strokeOpacity="0.78" />
+            <rect
+              x={x - candleWidth / 2}
+              y={bodyY}
+              width={candleWidth}
+              height={bodyHeight}
+              rx="1"
+              fill={color}
+              fillOpacity={bullish ? "0.72" : "0.64"}
+            />
+          </g>
+        );
+      })}
+
+      {lineKeys.map(([key, color]) => {
+        const path = seriesPath(candles, key, xFor, yFor);
+        return path ? <path key={key} d={path} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" /> : null;
+      })}
+
+      {[
+        ["Support", priceRange?.support_level, "rgba(226,232,240,0.55)"],
+        ["Resistance", priceRange?.resistance_level, "rgba(226,232,240,0.55)"],
+        ["Expected low", priceRange?.expected_low, "rgba(34,211,238,0.45)"],
+        ["Expected high", priceRange?.expected_high, "rgba(34,211,238,0.45)"]
+      ].map(([label, value, color]) => isFiniteNumber(value) ? (
+        <g key={label}>
+          <line x1={margin.left} x2={width - margin.right} y1={yFor(value)} y2={yFor(value)} stroke={color} strokeDasharray="6 6" />
+          <text x={width - margin.right + 8} y={yFor(value) + 4} fill="rgb(203,213,225)" fontSize="11">{label}</text>
+        </g>
+      ) : null)}
+
+      <line x1={margin.left} x2={width - margin.right} y1={markerY} y2={markerY} stroke={markerColor} strokeOpacity="0.65" />
+      <DecisionMarker x={latestX} y={markerY} side={decision.side} color={markerColor} />
+      <text x={latestX - 28} y={Math.max(18, markerY - 18)} fill={markerColor} fontSize="14" fontWeight="700">{decision.bias}</text>
+
+      {[minPrice, (minPrice + maxPrice) / 2, maxPrice].map((value) => (
+        <text key={value} x={width - margin.right + 8} y={yFor(value) + 4} fill="rgb(148,163,184)" fontSize="11">
+          {formatUsd(value)}
+        </text>
+      ))}
+      <text x={margin.left} y={height - 12} fill="rgb(148,163,184)" fontSize="11">
+        {formatShortDate(candles[0]?.time)}
+      </text>
+      <text x={width - margin.right - 92} y={height - 12} fill="rgb(148,163,184)" fontSize="11">
+        {formatShortDate(candles[candles.length - 1]?.time)}
+      </text>
+    </svg>
+  );
+}
+
+function DecisionMarker({ x, y, side, color }) {
+  if (side === "LONG") {
+    return <path d={`M ${x} ${y - 14} L ${x - 12} ${y + 10} L ${x + 12} ${y + 10} Z`} fill={color} />;
+  }
+  if (side === "SHORT") {
+    return <path d={`M ${x} ${y + 14} L ${x - 12} ${y - 10} L ${x + 12} ${y - 10} Z`} fill={color} />;
+  }
+  return <circle cx={x} cy={y} r="9" fill={color} />;
+}
+
+function IndicatorPanel({ title, candles, keys, domain, guides = [], colors, histogram = false, formatter }) {
+  const width = 360;
+  const height = 118;
+  const margin = { top: 14, right: 34, bottom: 18, left: 38 };
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = height - margin.top - margin.bottom;
+  const values = candles.flatMap((candle) => keys.map((key) => candle[key])).filter(isFiniteNumber);
+  const [minValue, maxValue] = Array.isArray(domain) ? domain : paddedDomain(values, 0.18);
+  const xFor = (index) => margin.left + (candles.length <= 1 ? 0 : (index / (candles.length - 1)) * innerWidth);
+  const yFor = (value) => margin.top + ((maxValue - value) / (maxValue - minValue || 1)) * innerHeight;
+  const zeroY = yFor(Math.max(minValue, Math.min(maxValue, 0)));
+  const barWidth = Math.max(2, innerWidth / candles.length * 0.6);
+
+  return (
+    <div className="rounded-2xl bg-black/20 p-4">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium text-slate-200">{title}</p>
+        <p className="text-xs text-slate-400">{formatter(values[values.length - 1])}</p>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="mt-2 h-auto w-full" role="img" aria-label={`${title} indicator`}>
+        <rect x="0" y="0" width={width} height={height} rx="14" fill="rgba(2,6,23,0.36)" />
+        {guides.map((guide) => (
+          <line key={guide} x1={margin.left} x2={width - margin.right} y1={yFor(guide)} y2={yFor(guide)} stroke="rgba(148,163,184,0.22)" strokeDasharray="4 5" />
+        ))}
+        {histogram ? (
+          candles.map((candle, index) => {
+            const value = candle[keys[0]];
+            if (!isFiniteNumber(value)) return null;
+            const y = yFor(value);
+            const fill = title === "MACD"
+              ? value >= 0 ? "#34d399" : "#fb7185"
+              : colors[0];
+            return (
+              <rect
+                key={`${candle.time}-${index}`}
+                x={xFor(index) - barWidth / 2}
+                y={Math.min(y, zeroY)}
+                width={barWidth}
+                height={Math.max(1, Math.abs(y - zeroY))}
+                fill={fill}
+                fillOpacity="0.75"
+              />
+            );
+          })
+        ) : keys.map((key, index) => {
+          const path = seriesPath(candles, key, xFor, yFor);
+          return path ? <path key={key} d={path} fill="none" stroke={colors[index]} strokeWidth="2.5" strokeLinecap="round" /> : null;
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function DecisionGauge({ label, value, tone }) {
+  const color = {
+    positive: "bg-emerald-300 text-emerald-100",
+    negative: "bg-rose-300 text-rose-100",
+    neutral: "bg-cyan-300 text-cyan-100"
+  }[tone];
+  return (
+    <div className="rounded-2xl bg-black/20 p-3">
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-slate-400">{label}</span>
+        <span className={color.split(" ")[1]}>{value.toFixed(0)}%</span>
+      </div>
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-white/10">
+        <div className={`h-full ${color.split(" ")[0]}`} style={{ width: `${Math.max(0, Math.min(100, value))}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function LegendItem({ color, label }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className={`h-2.5 w-2.5 rounded-full ${color}`} />
+      <span>{label}</span>
+    </div>
   );
 }
 
@@ -425,6 +764,75 @@ function MiniLine({ label, value }) {
   );
 }
 
+function buildDecision(evaluation) {
+  const score = Number(evaluation.signal?.score ?? 0);
+  const signal = evaluation.signal?.signal ?? "HOLD / NEUTRAL";
+  const action = evaluation.futures?.action ?? "STAY FLAT";
+  const side = action === "GO LONG" || signal === "STRONG BUY"
+    ? "LONG"
+    : action === "GO SHORT" || signal === "STRONG SELL"
+      ? "SHORT"
+      : "FLAT";
+  const directional = Math.min(96, Math.abs(score) * 100);
+  let long = score > 0 ? directional : Math.max(0, 12 + score * 30);
+  let short = score < 0 ? directional : Math.max(0, 12 - score * 30);
+  let flat = Math.max(0, 100 - long - short);
+
+  if (side === "LONG") {
+    long = Math.max(long, 58);
+    flat = Math.min(flat, 34);
+  } else if (side === "SHORT") {
+    short = Math.max(short, 58);
+    flat = Math.min(flat, 34);
+  } else {
+    flat = Math.max(flat, 62);
+  }
+
+  const total = long + short + flat || 1;
+  long = (long / total) * 100;
+  short = (short / total) * 100;
+  flat = (flat / total) * 100;
+
+  const bias = side === "LONG" ? "GO LONG" : side === "SHORT" ? "GO SHORT" : "STAY FLAT";
+  return {
+    side,
+    bias,
+    long,
+    short,
+    flat,
+    reason: evaluation.futures?.reason ?? "Waiting for full confirmation.",
+    textClass: side === "LONG" ? "text-emerald-300" : side === "SHORT" ? "text-rose-300" : "text-cyan-200",
+    markerClass: side === "LONG" ? "bg-emerald-300" : side === "SHORT" ? "bg-rose-300" : "bg-cyan-300"
+  };
+}
+
+function paddedDomain(values, padding = 0.1) {
+  const finite = values.filter(isFiniteNumber);
+  if (!finite.length) return [0, 1];
+  let min = Math.min(...finite);
+  let max = Math.max(...finite);
+  if (min === max) {
+    min -= Math.max(1, Math.abs(min) * 0.01);
+    max += Math.max(1, Math.abs(max) * 0.01);
+  }
+  const pad = (max - min) * padding;
+  return [min - pad, max + pad];
+}
+
+function seriesPath(rows, key, xFor, yFor) {
+  const points = rows
+    .map((row, index) => [xFor(index), row[key]])
+    .filter(([, value]) => isFiniteNumber(value));
+  if (!points.length) return "";
+  return points
+    .map(([x, value], index) => `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${yFor(value).toFixed(2)}`)
+    .join(" ");
+}
+
+function isFiniteNumber(value) {
+  return value !== null && value !== undefined && Number.isFinite(Number(value));
+}
+
 function connectionClass(connection) {
   if (connection === "live") return "bg-emerald-300 shadow-[0_0_18px_rgba(110,231,183,0.8)]";
   if (connection === "reconnecting") return "bg-amber-300";
@@ -448,6 +856,15 @@ function formatCompactUsd(value) {
   if (Math.abs(amount) >= 1_000_000) return `$${(amount / 1_000_000).toFixed(2)}M`;
   if (Math.abs(amount) >= 1_000) return `$${(amount / 1_000).toFixed(2)}K`;
   return formatUsd(amount);
+}
+
+function formatCompact(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  const amount = Number(value);
+  if (Math.abs(amount) >= 1_000_000_000) return `${(amount / 1_000_000_000).toFixed(2)}B`;
+  if (Math.abs(amount) >= 1_000_000) return `${(amount / 1_000_000).toFixed(2)}M`;
+  if (Math.abs(amount) >= 1_000) return `${(amount / 1_000).toFixed(2)}K`;
+  return amount.toFixed(2);
 }
 
 function formatPct(value, digits = 2) {
@@ -501,6 +918,15 @@ function formatTime(value) {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit"
+  }).format(new Date(value));
+}
+
+function formatShortDate(value) {
+  if (!value) return "-";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit"
   }).format(new Date(value));
 }
 

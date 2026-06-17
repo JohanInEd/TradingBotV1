@@ -361,7 +361,32 @@ def _signal_panel(evaluation: Evaluation) -> Panel:
         style="bold",
     )
     content: list[RenderableType] = [title, detail]
-    if futures is not None:
+    paper_setup = evaluation.paper_setup
+    if paper_setup is not None:
+        futures_style = "bold green" if paper_setup.side == "LONG" else "bold red"
+        recommendation = Text(justify="center")
+        recommendation.append(
+            f"paper setup: {paper_setup.action}",
+            style=futures_style,
+        )
+        recommendation.append(
+            f" | Entry {paper_setup.entry_price:,.2f}"
+            f" | Stop {paper_setup.stop_loss:,.2f}"
+            f" | TP {paper_setup.take_profit:,.2f}"
+            f" | R/R {paper_setup.reward_to_risk:.2f}"
+            f" | Pos {paper_setup.quantity_btc:.6f} BTC"
+            f" | Max loss ${paper_setup.max_loss:,.2f}",
+            style="bold",
+        )
+        content.append(recommendation)
+        content.append(
+            Text(
+                "paper setup only; no order placed; not financial advice",
+                style="dim",
+                justify="center",
+            )
+        )
+    elif futures is not None:
         futures_style = (
             "bold green"
             if futures.side == "LONG"
@@ -388,11 +413,37 @@ def _signal_panel(evaluation: Evaluation) -> Panel:
         content.append(recommendation)
         content.append(
             Text(
-                "Paper guidance only. Closed candles; no order is placed.",
+                "No paper setup for this closed candle; no order placed; not financial advice.",
                 style="dim",
                 justify="center",
             )
         )
+    if evaluation.probability_forecast is not None:
+        probability = evaluation.probability_forecast
+        odds_line = Text(justify="center")
+        odds_line.append(
+            f"{probability.horizon_hours}h backtest odds: ",
+            style="bold cyan",
+        )
+        odds_line.append(
+            f"Up {_probability_pct(probability.up_probability)}"
+            f" | Down {_probability_pct(probability.down_probability)}"
+            f" | Long TP/SL "
+            f"{_probability_pct(probability.long_tp_before_sl_probability)}/"
+            f"{_probability_pct(probability.long_sl_before_tp_probability)}"
+            f" | Short TP/SL "
+            f"{_probability_pct(probability.short_tp_before_sl_probability)}/"
+            f"{_probability_pct(probability.short_sl_before_tp_probability)}",
+            style="bold",
+        )
+        odds_line.append(
+            f" | Exp R L {probability.expected_long_r:+.2f}"
+            f" / S {probability.expected_short_r:+.2f}"
+            f" | {probability.sample_size}/{probability.candidate_count}"
+            f" samples {probability.confidence}",
+            style="dim",
+        )
+        content.append(odds_line)
     if evaluation.price_range is not None:
         price_range = evaluation.price_range
         range_line = Text(justify="center")
@@ -597,6 +648,10 @@ def _health_age(value: datetime) -> str:
     if seconds < 3600:
         return f"{seconds // 60}m"
     return f"{seconds // 3600}h"
+
+
+def _probability_pct(value: float) -> str:
+    return f"{value * 100:.0f}%"
 
 
 def _compact_usd(value: float) -> str:

@@ -77,8 +77,10 @@ function App() {
   const sentiment = evaluation?.sentiment;
   const macro = evaluation?.macro;
   const futures = evaluation?.futures;
+  const paperSetup = evaluation?.paper_setup;
   const futuresMetrics = evaluation?.futures_metrics;
   const priceRange = evaluation?.price_range;
+  const probability = evaluation?.probability_forecast;
   const marketContext = evaluation?.market_context;
   const shakeout = evaluation?.shakeout;
 
@@ -112,6 +114,12 @@ function App() {
                 value={signal.signal}
                 detail={`Score ${formatNumber(signal.score, 3)} / Raw ${formatNumber(signal.raw_score, 3)}`}
                 tone={signal.score > 0.2 ? "positive" : signal.score < -0.2 ? "negative" : "neutral"}
+              />
+              <MetricCard
+                label={`${probability?.horizon_hours ?? 24}h Backtest Odds`}
+                value={`${formatProbability(probability?.up_probability)} up / ${formatProbability(probability?.down_probability)} down`}
+                detail={`${probability?.confidence ?? "-"} - ${probability?.sample_size ?? 0}/${probability?.candidate_count ?? 0} similar samples`}
+                tone={!probability ? "neutral" : probability.up_probability >= probability.down_probability ? "positive" : "negative"}
               />
               <MetricCard
                 label="News Sentiment"
@@ -148,7 +156,7 @@ function App() {
             <DecisionChart evaluation={evaluation} chart={chart} />
 
             <section className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
-              <SignalPanel evaluation={evaluation} futures={futures} futuresMetrics={futuresMetrics} priceRange={priceRange} shakeout={shakeout} />
+              <SignalPanel evaluation={evaluation} futures={futures} paperSetup={paperSetup} futuresMetrics={futuresMetrics} probability={probability} priceRange={priceRange} shakeout={shakeout} />
               <NewsPanel headlines={allHeadlines} />
             </section>
 
@@ -542,7 +550,7 @@ function MetricCard({ label, value, detail, tone }) {
   );
 }
 
-function SignalPanel({ evaluation, futures, futuresMetrics, priceRange, shakeout }) {
+function SignalPanel({ evaluation, futures, paperSetup, futuresMetrics, probability, priceRange, shakeout }) {
   const technical = evaluation.live_technical ?? evaluation.technical;
   const shakeoutContext = shakeoutSignalContext(shakeout, evaluation.signal);
   return (
@@ -564,17 +572,7 @@ function SignalPanel({ evaluation, futures, futuresMetrics, priceRange, shakeout
       </div>
 
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
-        <div className="rounded-2xl bg-black/20 p-4">
-          <p className="text-sm font-medium text-slate-200">Paper futures guidance</p>
-          <p className="mt-2 text-3xl font-semibold text-cyan-200">{futures?.action ?? "STAY FLAT"}</p>
-          <p className="mt-2 text-sm text-slate-400">{futures?.reason}</p>
-          <div className="mt-4 grid grid-cols-2 gap-2 text-sm text-slate-300">
-            <span>Entry {formatUsd(futures?.entry_price)}</span>
-            <span>Stop {formatUsd(futures?.stop_loss)}</span>
-            <span>Target {formatUsd(futures?.take_profit)}</span>
-            <span>Max loss {formatUsd(futures?.max_loss)}</span>
-          </div>
-        </div>
+        <PaperSetupCard paperSetup={paperSetup} futures={futures} />
         <div className="rounded-2xl bg-black/20 p-4">
           <p className="text-sm font-medium text-slate-200">Derivatives context</p>
           <div className="mt-4 grid grid-cols-2 gap-3 text-sm text-slate-300">
@@ -585,6 +583,31 @@ function SignalPanel({ evaluation, futures, futuresMetrics, priceRange, shakeout
           </div>
         </div>
       </div>
+
+      {probability ? (
+        <div className="mt-4 rounded-2xl border border-emerald-300/20 bg-emerald-300/10 p-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <p className="text-sm font-medium text-emerald-100">
+                Historical probability for next {probability.horizon_hours}h
+              </p>
+              <p className="mt-2 text-sm text-slate-300">
+                Similar closed 4h setups moved up {formatProbability(probability.up_probability)}
+                {" "}and down {formatProbability(probability.down_probability)} by horizon close.
+              </p>
+              <p className="mt-2 text-xs text-slate-400">{probability.method}</p>
+            </div>
+            <div className="min-w-64 rounded-xl bg-black/20 p-3 text-sm text-slate-300">
+              <MiniLine label="Long TP / SL" value={`${formatProbability(probability.long_tp_before_sl_probability)} / ${formatProbability(probability.long_sl_before_tp_probability)}`} />
+              <MiniLine label="Short TP / SL" value={`${formatProbability(probability.short_tp_before_sl_probability)} / ${formatProbability(probability.short_sl_before_tp_probability)}`} />
+              <MiniLine label="Expected R" value={`L ${formatNumber(probability.expected_long_r, 2)} / S ${formatNumber(probability.expected_short_r, 2)}`} />
+              <MiniLine label="Avg move" value={formatPct(probability.average_forward_return_percent)} />
+              <MiniLine label="Samples" value={`${probability.sample_size}/${probability.candidate_count}`} />
+              <MiniLine label="Confidence" value={probability.confidence} />
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {shakeout ? (
         <div className="mt-4 rounded-2xl border border-amber-300/20 bg-amber-300/10 p-4">
@@ -654,6 +677,53 @@ function SignalPanel({ evaluation, futures, futuresMetrics, priceRange, shakeout
         </div>
       ) : null}
     </section>
+  );
+}
+
+function PaperSetupCard({ paperSetup, futures }) {
+  if (!paperSetup) {
+    return (
+      <div className="rounded-2xl bg-black/20 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm font-medium text-slate-200">paper setup</p>
+          <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">no order placed</span>
+        </div>
+        <p className="mt-2 text-3xl font-semibold text-cyan-200">{futures?.action ?? "STAY FLAT"}</p>
+        <p className="mt-2 text-sm text-slate-400">
+          {futures?.reason ?? "No closed-candle paper setup."}
+        </p>
+        <p className="mt-3 text-xs text-slate-500">
+          No paper setup for this closed candle. No order placed. Not financial advice.
+        </p>
+      </div>
+    );
+  }
+
+  const sideClass = paperSetup.side === "LONG" ? "text-emerald-200" : "text-rose-200";
+  const borderClass = paperSetup.side === "LONG" ? "border-emerald-300/25" : "border-rose-300/25";
+
+  return (
+    <div className={`rounded-2xl border ${borderClass} bg-black/20 p-4`}>
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm font-medium text-slate-200">paper setup</p>
+        <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">no order placed</span>
+      </div>
+      <p className={`mt-2 text-3xl font-semibold ${sideClass}`}>{paperSetup.action}</p>
+      <p className="mt-2 text-sm text-slate-400">
+        Closed candle {formatShortDate(paperSetup.candle_time)} - {paperSetup.disclaimer}
+      </p>
+      <div className="mt-4 grid grid-cols-2 gap-3 text-sm text-slate-300">
+        <MiniLine label="Entry" value={formatUsd(paperSetup.entry_price)} />
+        <MiniLine label="Stop loss" value={formatUsd(paperSetup.stop_loss)} />
+        <MiniLine label="Take profit" value={formatUsd(paperSetup.take_profit)} />
+        <MiniLine label="Reward/risk" value={`${formatNumber(paperSetup.reward_to_risk, 2)}R`} />
+        <MiniLine label="Max loss" value={formatUsd(paperSetup.max_loss)} />
+        <p className="col-span-2">
+          <span className="text-slate-500">Position est.</span>{" "}
+          <span className="font-medium text-slate-100">{paperSetup.position_estimate}</span>
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -768,24 +838,35 @@ function buildDecision(evaluation) {
   const score = Number(evaluation.signal?.score ?? 0);
   const signal = evaluation.signal?.signal ?? "HOLD / NEUTRAL";
   const action = evaluation.futures?.action ?? "STAY FLAT";
+  const probability = evaluation.probability_forecast;
   const side = action === "GO LONG" || signal === "STRONG BUY"
     ? "LONG"
     : action === "GO SHORT" || signal === "STRONG SELL"
       ? "SHORT"
       : "FLAT";
-  const directional = Math.min(96, Math.abs(score) * 100);
-  let long = score > 0 ? directional : Math.max(0, 12 + score * 30);
-  let short = score < 0 ? directional : Math.max(0, 12 - score * 30);
-  let flat = Math.max(0, 100 - long - short);
+  let long;
+  let short;
+  let flat;
 
-  if (side === "LONG") {
-    long = Math.max(long, 58);
-    flat = Math.min(flat, 34);
-  } else if (side === "SHORT") {
-    short = Math.max(short, 58);
-    flat = Math.min(flat, 34);
+  if (probability) {
+    long = probability.up_probability * 100;
+    short = probability.down_probability * 100;
+    flat = probability.flat_probability * 100;
   } else {
-    flat = Math.max(flat, 62);
+    const directional = Math.min(96, Math.abs(score) * 100);
+    long = score > 0 ? directional : Math.max(0, 12 + score * 30);
+    short = score < 0 ? directional : Math.max(0, 12 - score * 30);
+    flat = Math.max(0, 100 - long - short);
+
+    if (side === "LONG") {
+      long = Math.max(long, 58);
+      flat = Math.min(flat, 34);
+    } else if (side === "SHORT") {
+      short = Math.max(short, 58);
+      flat = Math.min(flat, 34);
+    } else {
+      flat = Math.max(flat, 62);
+    }
   }
 
   const total = long + short + flat || 1;
@@ -800,7 +881,9 @@ function buildDecision(evaluation) {
     long,
     short,
     flat,
-    reason: evaluation.futures?.reason ?? "Waiting for full confirmation.",
+    reason: probability
+      ? `${probability.horizon_hours}h historical odds from ${probability.sample_size} similar closed-candle setups.`
+      : evaluation.futures?.reason ?? "Waiting for full confirmation.",
     textClass: side === "LONG" ? "text-emerald-300" : side === "SHORT" ? "text-rose-300" : "text-cyan-200",
     markerClass: side === "LONG" ? "bg-emerald-300" : side === "SHORT" ? "bg-rose-300" : "bg-cyan-300"
   };
@@ -871,6 +954,11 @@ function formatPct(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
   const sign = Number(value) > 0 ? "+" : "";
   return `${sign}${Number(value).toFixed(digits)}%`;
+}
+
+function formatProbability(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  return `${(Number(value) * 100).toFixed(0)}%`;
 }
 
 function formatNumber(value, digits = 2) {

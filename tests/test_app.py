@@ -1,10 +1,13 @@
 from datetime import datetime, timedelta, timezone
 
+import pandas as pd
+
 from btc_trading_bot.app import (
     _apply_news_refresh,
     _apply_stream_events,
     _configure_console_encoding,
     _market_is_stale,
+    _probability_candles_for_backtest,
 )
 from btc_trading_bot.config import Settings
 from btc_trading_bot.models import (
@@ -170,6 +173,12 @@ def test_console_encoding_replaces_unsupported_characters(monkeypatch) -> None:
 def test_shakeout_event_log_path_reads_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("BOT_SHAKEOUT_EVENT_LOG", "logs/shakeout.jsonl")
     monkeypatch.setenv("BOT_SHAKEOUT_BASELINE_WINDOW_SECONDS", "1200")
+    monkeypatch.setenv("BOT_PROBABILITY_HORIZON_HOURS", "48")
+    monkeypatch.setenv("BOT_PROBABILITY_MAX_SAMPLES", "80")
+    monkeypatch.setenv("BOT_SIGNAL_JOURNAL_PATH", "logs/signals.jsonl")
+    monkeypatch.setenv("BOT_PAPER_SETUP_JOURNAL_PATH", "logs/paper-setups.sqlite")
+    monkeypatch.setenv("BOT_PAPER_SETUP_HORIZON_HOURS", "48")
+    monkeypatch.setenv("BOT_HISTORY_DB_PATH", "data/history.sqlite")
 
     settings = Settings.from_env()
 
@@ -177,3 +186,43 @@ def test_shakeout_event_log_path_reads_from_environment(monkeypatch) -> None:
     assert settings.shakeout_event_log_path.name == "shakeout.jsonl"
     assert settings.shakeout_event_log_path.parent.name == "logs"
     assert settings.shakeout_baseline_window_seconds == 1200
+    assert settings.probability_horizon_hours == 48
+    assert settings.probability_max_samples == 80
+    assert settings.signal_journal_path is not None
+    assert settings.signal_journal_path.name == "signals.jsonl"
+    assert settings.paper_setup_journal_path is not None
+    assert settings.paper_setup_journal_path.name == "paper-setups.sqlite"
+    assert settings.paper_setup_horizon_hours == 48
+    assert settings.history_db_path is not None
+    assert settings.history_db_path.name == "history.sqlite"
+
+
+def test_probability_backtest_falls_back_when_local_history_missing(tmp_path) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    live_candles = pd.DataFrame(
+        [
+            {
+                "timestamp": start + timedelta(hours=4 * index),
+                "open": 100.0 + index,
+                "high": 101.0 + index,
+                "low": 99.0 + index,
+                "close": 100.5 + index,
+                "volume": 1.0,
+            }
+            for index in range(80)
+        ]
+    )
+    settings = Settings(
+        history_db_path=tmp_path / "history.sqlite",
+        probability_lookback_candles=80,
+    )
+
+    candles = _probability_candles_for_backtest(
+        settings,
+        "binanceusdm",
+        "BTC/USDT:USDT",
+        live_candles,
+        horizon_candles=6,
+    )
+
+    assert candles is live_candles

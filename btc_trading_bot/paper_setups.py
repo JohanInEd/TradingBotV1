@@ -1,0 +1,954 @@
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sqlite3
+from collections import defaultdict
+from collections.abc import Sequence
+from dataclasses import dataclass, fields, is_dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+from btc_trading_bot.config import Settings
+from btc_trading_bot.models import (
+    Evaluation,
+    FuturesRecommendation,
+    MarketContext,
+    PaperSetup,
+    ProbabilityForecast,
+    TechnicalAnalysis,
+)
+
+OUTCOME_OPEN = "OPEN"
+OUTCOME_TP = "TP"
+OUTCOME_SL = "SL"
+OUTCOME_EXPIRED = "EXPIRED"
+PAPER_SETUP_LABEL = "paper setup"
+PAPER_SETUP_DISCLAIMER = "paper setup only; no order placed; not financial advice"
+SAME_CANDLE_RULE = (
+    "Conservative public-candle rule: when TP and SL are both inside one "
+    "candle after entry is observed, record SL because intrabar order is unknown."
+)
+ANALYSIS_GROUPS = (
+    "side",
+    "score_bucket",
+    "market_regime",
+    "volatility_regime",
+    "trend_range_context",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSetupResolution:
+    changed: bool
+    outcome: str
+    entry_reached: bool
+    entry_reached_at: datetime | None
+    outcome_at: datetime | None
+    outcome_candle_at: datetime | None
+    outcome_price: float | None
+    r_multiple: float | None
+    duration_hours: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSetupStats:
+    total_setups: int
+    open_count: int
+    tp_count: int
+    sl_count: int
+    expired_count: int
+    win_rate: float | None
+    expected_r: float | None
+    average_time_to_outcome_hours: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSetupReport:
+    total_setups: int
+    overall: PaperSetupStats
+    groups: dict[str, dict[str, PaperSetupStats]]
+
+
+class PaperSetupJournal:
+    def __init__(self, path: Path, *, horizon_hours: int = 24) -> None:
+        self.path = Path(path).expanduser()
+        self.horizon_hours = horizon_hours
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.connection = sqlite3.connect(self.path)
+        self.connection.row_factory = sqlite3.Row
+        self.initialize_schema()
+
+    def __enter__(self) -> "PaperSetupJournal":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def initialize_schema(self) -> None:
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS paper_setups (
+                setup_key TEXT PRIMARY KEY,
+                exchange TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                closed_candle_at TEXT NOT NULL,
+                signal_time TEXT NOT NULL,
+                side TEXT NOT NULL,
+                futures_action TEXT NOT NULL,
+                entry REAL NOT NULL,
+                stop_loss REAL NOT NULL,
+                take_profit REAL NOT NULL,
+                reward_to_risk REAL NOT NULL,
+                close_price REAL NOT NULL,
+                technical_score REAL,
+                score_bucket TEXT NOT NULL,
+                market_regime TEXT NOT NULL,
+                volatility_regime TEXT NOT NULL,
+                trend_range_context TEXT NOT NULL,
+                quantity_btc REAL NOT NULL,
+                notional REAL NOT NULL,
+                max_loss REAL NOT NULL,
+                leverage INTEGER NOT NULL,
+                signal_json TEXT NOT NULL,
+                market_context_json TEXT,
+                probability_forecast_json TEXT,
+                setup_json TEXT NOT NULL,
+                outcome TEXT NOT NULL DEFAULT 'OPEN',
+                entry_reached INTEGER NOT NULL DEFAULT 0,
+                entry_reached_at TEXT,
+                outcome_at TEXT,
+                outcome_candle_at TEXT,
+                outcome_price REAL,
+                r_multiple REAL,
+                duration_hours REAL,
+                expires_at TEXT NOT NULL,
+                same_candle_rule TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (
+                    exchange,
+                    symbol,
+                    timeframe,
+                    closed_candle_at,
+                    side,
+                    entry,
+                    stop_loss,
+                    take_profit
+                )
+            );
+            CREATE INDEX IF NOT EXISTS idx_paper_setups_open
+                ON paper_setups (exchange, symbol, timeframe, outcome, closed_candle_at);
+            CREATE INDEX IF NOT EXISTS idx_paper_setups_outcome
+                ON paper_setups (outcome, closed_candle_at);
+            """
+        )
+        self.connection.commit()
+
+    def record(
+        self,
+        evaluation: Evaluation,
+        *,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        settings: Settings,
+    ) -> bool:
+        record = build_setup_record(
+            evaluation,
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=timeframe,
+            settings=settings,
+        )
+        if record is None:
+            return False
+        cursor = self.connection.execute(
+            """
+            INSERT OR IGNORE INTO paper_setups (
+                setup_key,
+                exchange,
+                symbol,
+                timeframe,
+                closed_candle_at,
+                signal_time,
+                side,
+                futures_action,
+                entry,
+                stop_loss,
+                take_profit,
+                reward_to_risk,
+                close_price,
+                technical_score,
+                score_bucket,
+                market_regime,
+                volatility_regime,
+                trend_range_context,
+                quantity_btc,
+                notional,
+                max_loss,
+                leverage,
+                signal_json,
+                market_context_json,
+                probability_forecast_json,
+                setup_json,
+                outcome,
+                entry_reached,
+                expires_at,
+                same_candle_rule,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                :setup_key,
+                :exchange,
+                :symbol,
+                :timeframe,
+                :closed_candle_at,
+                :signal_time,
+                :side,
+                :futures_action,
+                :entry,
+                :stop_loss,
+                :take_profit,
+                :reward_to_risk,
+                :close_price,
+                :technical_score,
+                :score_bucket,
+                :market_regime,
+                :volatility_regime,
+                :trend_range_context,
+                :quantity_btc,
+                :notional,
+                :max_loss,
+                :leverage,
+                :signal_json,
+                :market_context_json,
+                :probability_forecast_json,
+                :setup_json,
+                :outcome,
+                :entry_reached,
+                :expires_at,
+                :same_candle_rule,
+                :created_at,
+                :updated_at
+            )
+            """,
+            record,
+        )
+        self.connection.commit()
+        return cursor.rowcount > 0
+
+    def resolve_with_candles(
+        self,
+        candles: Any,
+        *,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        limit_per_candle: int = 500,
+    ) -> int:
+        resolved_count = 0
+        for candle in _normalise_candles(candles):
+            rows = self._open_rows(
+                exchange,
+                symbol,
+                timeframe,
+                candle["time"],
+                limit=limit_per_candle,
+            )
+            for row in rows:
+                resolution = resolve_setup_outcome(
+                    row,
+                    candle,
+                    horizon_hours=self.horizon_hours,
+                )
+                if not resolution.changed:
+                    continue
+                self._apply_resolution(row["setup_key"], resolution)
+                if resolution.outcome != OUTCOME_OPEN:
+                    resolved_count += 1
+        self.connection.commit()
+        return resolved_count
+
+    def load_setups(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT *
+            FROM paper_setups
+            ORDER BY closed_candle_at ASC, side ASC
+            """
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def _open_rows(
+        self,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        candle_time: datetime,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT *
+            FROM paper_setups
+            WHERE exchange = ?
+                AND symbol = ?
+                AND timeframe = ?
+                AND outcome = 'OPEN'
+                AND closed_candle_at < ?
+            ORDER BY closed_candle_at ASC
+            LIMIT ?
+            """,
+            (exchange, symbol, timeframe, _iso(candle_time), max(1, limit)),
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def _apply_resolution(
+        self,
+        setup_key: str,
+        resolution: PaperSetupResolution,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE paper_setups
+            SET outcome = ?,
+                entry_reached = ?,
+                entry_reached_at = ?,
+                outcome_at = ?,
+                outcome_candle_at = ?,
+                outcome_price = ?,
+                r_multiple = ?,
+                duration_hours = ?,
+                updated_at = ?
+            WHERE setup_key = ?
+            """,
+            (
+                resolution.outcome,
+                1 if resolution.entry_reached else 0,
+                _iso(resolution.entry_reached_at),
+                _iso(resolution.outcome_at),
+                _iso(resolution.outcome_candle_at),
+                resolution.outcome_price,
+                resolution.r_multiple,
+                resolution.duration_hours,
+                _iso(datetime.now(timezone.utc)),
+                setup_key,
+            ),
+        )
+
+
+def build_current_paper_setup(
+    *,
+    futures: FuturesRecommendation | None,
+    technical: TechnicalAnalysis,
+    evaluated_at: datetime,
+    settings: Settings,
+    market_context: MarketContext | None = None,
+    probability_forecast: ProbabilityForecast | None = None,
+) -> PaperSetup | None:
+    if futures is None or futures.side not in {"LONG", "SHORT"}:
+        return None
+    if (
+        futures.entry_price is None
+        or futures.stop_loss is None
+        or futures.take_profit is None
+    ):
+        return None
+    reward_to_risk = _reward_to_risk(
+        futures.entry_price,
+        futures.stop_loss,
+        futures.take_profit,
+    )
+    market_regime, volatility_regime, trend_range_context = _context_labels(
+        market_context
+    )
+    return PaperSetup(
+        label=PAPER_SETUP_LABEL,
+        side=futures.side,
+        action=futures.action,
+        status=OUTCOME_OPEN,
+        entry_price=futures.entry_price,
+        stop_loss=futures.stop_loss,
+        take_profit=futures.take_profit,
+        reward_to_risk=reward_to_risk or settings.reward_to_risk,
+        quantity_btc=futures.quantity_btc,
+        notional=futures.notional,
+        max_loss=futures.max_loss,
+        leverage=futures.leverage,
+        position_estimate=(
+            f"{futures.quantity_btc:.6f} BTC / ${futures.notional:,.2f} notional"
+        ),
+        signal_time=evaluated_at,
+        candle_time=technical.candle_time,
+        close_price=technical.close,
+        technical_score=technical.score,
+        futures_action=futures.action,
+        market_regime=market_regime,
+        volatility_regime=volatility_regime,
+        trend_range_context=trend_range_context,
+        probability_method=(
+            probability_forecast.method if probability_forecast is not None else None
+        ),
+        outcome=OUTCOME_OPEN,
+        disclaimer=PAPER_SETUP_DISCLAIMER,
+    )
+
+
+def build_setup_record(
+    evaluation: Evaluation,
+    *,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    settings: Settings,
+) -> dict[str, Any] | None:
+    setup = evaluation.paper_setup or build_current_paper_setup(
+        futures=evaluation.futures,
+        technical=evaluation.technical,
+        evaluated_at=evaluation.evaluated_at,
+        settings=settings,
+        market_context=evaluation.market_context,
+        probability_forecast=evaluation.probability_forecast,
+    )
+    if setup is None:
+        return None
+
+    now = datetime.now(timezone.utc)
+    expires_at = setup.candle_time + timedelta(
+        hours=settings.paper_setup_horizon_hours
+    )
+    score_bucket = _score_bucket(setup.technical_score)
+    signal_json = _json_dumps(_jsonable(evaluation.signal))
+    market_context_json = _json_dumps(_jsonable(evaluation.market_context))
+    probability_json = _json_dumps(_jsonable(evaluation.probability_forecast))
+    setup_json = _json_dumps(_jsonable(setup))
+    return {
+        "setup_key": _setup_key(
+            exchange,
+            symbol,
+            timeframe,
+            setup.candle_time,
+            setup.side,
+            setup.entry_price,
+            setup.stop_loss,
+            setup.take_profit,
+        ),
+        "exchange": exchange,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "closed_candle_at": _iso(setup.candle_time),
+        "signal_time": _iso(setup.signal_time),
+        "side": setup.side,
+        "futures_action": setup.futures_action,
+        "entry": setup.entry_price,
+        "stop_loss": setup.stop_loss,
+        "take_profit": setup.take_profit,
+        "reward_to_risk": setup.reward_to_risk,
+        "close_price": setup.close_price,
+        "technical_score": setup.technical_score,
+        "score_bucket": score_bucket,
+        "market_regime": setup.market_regime or "UNKNOWN",
+        "volatility_regime": setup.volatility_regime or "UNKNOWN",
+        "trend_range_context": setup.trend_range_context or "UNKNOWN",
+        "quantity_btc": setup.quantity_btc,
+        "notional": setup.notional,
+        "max_loss": setup.max_loss,
+        "leverage": setup.leverage,
+        "signal_json": signal_json,
+        "market_context_json": market_context_json,
+        "probability_forecast_json": probability_json,
+        "setup_json": setup_json,
+        "outcome": OUTCOME_OPEN,
+        "entry_reached": 0,
+        "expires_at": _iso(expires_at),
+        "same_candle_rule": SAME_CANDLE_RULE,
+        "created_at": _iso(now),
+        "updated_at": _iso(now),
+    }
+
+
+def resolve_setup_outcome(
+    setup: dict[str, Any],
+    candle: dict[str, Any],
+    *,
+    horizon_hours: int,
+) -> PaperSetupResolution:
+    previous_outcome = str(setup.get("outcome") or OUTCOME_OPEN)
+    entry_reached = bool(setup.get("entry_reached"))
+    entry_reached_at = _parse_datetime_or_none(setup.get("entry_reached_at"))
+    if previous_outcome != OUTCOME_OPEN:
+        return _unchanged(previous_outcome, entry_reached, entry_reached_at)
+
+    candle_time = _parse_datetime(candle.get("time"))
+    closed_at = _parse_datetime(setup.get("closed_candle_at"))
+    if candle_time <= closed_at:
+        return _unchanged(previous_outcome, entry_reached, entry_reached_at)
+
+    high = _finite_or_none(candle.get("high"))
+    low = _finite_or_none(candle.get("low"))
+    close = _finite_or_none(candle.get("close"))
+    if high is None or low is None or close is None:
+        return _unchanged(previous_outcome, entry_reached, entry_reached_at)
+
+    entry = _finite_or_none(setup.get("entry"))
+    stop = _finite_or_none(setup.get("stop_loss"))
+    target = _finite_or_none(setup.get("take_profit"))
+    if entry is None or stop is None or target is None:
+        return _unchanged(previous_outcome, entry_reached, entry_reached_at)
+    side = str(setup.get("side") or "")
+    reward_to_risk = _reward_to_risk(entry, stop, target)
+    stop_distance = abs(entry - stop)
+    if side not in {"LONG", "SHORT"} or stop_distance <= 0:
+        return _unchanged(previous_outcome, entry_reached, entry_reached_at)
+
+    changed = False
+    if not entry_reached and low <= entry <= high:
+        entry_reached = True
+        entry_reached_at = candle_time
+        changed = True
+
+    if entry_reached:
+        if side == "LONG":
+            hit_stop = low <= stop
+            hit_target = high >= target
+        else:
+            hit_stop = high >= stop
+            hit_target = low <= target
+        if hit_stop and hit_target:
+            return _resolved(
+                OUTCOME_SL,
+                entry_reached,
+                entry_reached_at,
+                candle_time,
+                closed_at,
+                stop,
+                -1.0,
+            )
+        if hit_stop:
+            return _resolved(
+                OUTCOME_SL,
+                entry_reached,
+                entry_reached_at,
+                candle_time,
+                closed_at,
+                stop,
+                -1.0,
+            )
+        if hit_target:
+            return _resolved(
+                OUTCOME_TP,
+                entry_reached,
+                entry_reached_at,
+                candle_time,
+                closed_at,
+                target,
+                reward_to_risk,
+            )
+
+    expires_at = _parse_datetime_or_none(setup.get("expires_at")) or (
+        closed_at + timedelta(hours=horizon_hours)
+    )
+    if candle_time >= expires_at:
+        r_multiple = (
+            _expired_r_multiple(side, entry, stop, target, close)
+            if entry_reached
+            else 0.0
+        )
+        return _resolved(
+            OUTCOME_EXPIRED,
+            entry_reached,
+            entry_reached_at,
+            candle_time,
+            closed_at,
+            close,
+            r_multiple,
+        )
+
+    return PaperSetupResolution(
+        changed=changed,
+        outcome=OUTCOME_OPEN,
+        entry_reached=entry_reached,
+        entry_reached_at=entry_reached_at,
+        outcome_at=None,
+        outcome_candle_at=None,
+        outcome_price=None,
+        r_multiple=None,
+        duration_hours=None,
+    )
+
+
+def analyze_paper_setups(path: Path) -> PaperSetupReport:
+    with PaperSetupJournal(path) as journal:
+        return analyze_setup_rows(journal.load_setups())
+
+
+def analyze_setup_rows(rows: list[dict[str, Any]]) -> PaperSetupReport:
+    groups: dict[str, dict[str, PaperSetupStats]] = {}
+    for group_name in ANALYSIS_GROUPS:
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            grouped[str(row.get(group_name) or "UNKNOWN")].append(row)
+        groups[group_name] = {
+            label: _stats(items) for label, items in sorted(grouped.items())
+        }
+    return PaperSetupReport(
+        total_setups=len(rows),
+        overall=_stats(rows),
+        groups=groups,
+    )
+
+
+def format_paper_setup_report(report: PaperSetupReport) -> str:
+    lines = [
+        f"Paper setup rows: {report.total_setups}",
+        _stats_line("Overall", report.overall),
+        f"Same-candle rule: {SAME_CANDLE_RULE}",
+    ]
+    for group_name in ANALYSIS_GROUPS:
+        group = report.groups.get(group_name, {})
+        if not group:
+            continue
+        lines.append("")
+        lines.append(f"By {group_name.replace('_', ' ')}:")
+        for label, stats in group.items():
+            lines.append(_stats_line(f"  {label}", stats))
+    return "\n".join(lines)
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Analyze BOT_PAPER_SETUP_JOURNAL_PATH paper setup outcomes"
+    )
+    parser.add_argument(
+        "path",
+        type=Path,
+        help="SQLite path from BOT_PAPER_SETUP_JOURNAL_PATH",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    print(format_paper_setup_report(analyze_paper_setups(args.path)))
+    return 0
+
+
+def _normalise_candles(candles: Any) -> list[dict[str, Any]]:
+    if candles is None:
+        return []
+    if isinstance(candles, dict):
+        candle = _normalise_candle(candles)
+        return [] if candle is None else [candle]
+    if hasattr(candles, "to_dict"):
+        try:
+            records = candles.to_dict("records")
+            return _normalise_candles(records)
+        except TypeError:
+            pass
+    normalised: list[dict[str, Any]] = []
+    for row in candles:
+        candle = _normalise_candle(row)
+        if candle is not None:
+            normalised.append(candle)
+    return sorted(normalised, key=lambda item: item["time"])
+
+
+def _normalise_candle(row: Any) -> dict[str, Any] | None:
+    if isinstance(row, dict):
+        time_value = (
+            row.get("time")
+            or row.get("timestamp")
+            or row.get("closed_candle_at")
+        )
+        high = row.get("high")
+        low = row.get("low")
+        close = row.get("close")
+    elif isinstance(row, Sequence) and not isinstance(row, str):
+        if len(row) < 5:
+            return None
+        time_value, _, high, low, close = row[:5]
+    else:
+        time_value = getattr(row, "time", None) or getattr(row, "timestamp", None)
+        high = getattr(row, "high", None)
+        low = getattr(row, "low", None)
+        close = getattr(row, "close", None)
+    try:
+        candle_time = _parse_datetime(time_value)
+    except (TypeError, ValueError):
+        return None
+    high_value = _finite_or_none(high)
+    low_value = _finite_or_none(low)
+    close_value = _finite_or_none(close)
+    if high_value is None or low_value is None or close_value is None:
+        return None
+    return {
+        "time": candle_time,
+        "high": high_value,
+        "low": low_value,
+        "close": close_value,
+    }
+
+
+def _resolved(
+    outcome: str,
+    entry_reached: bool,
+    entry_reached_at: datetime | None,
+    candle_time: datetime,
+    closed_at: datetime,
+    outcome_price: float,
+    r_multiple: float,
+) -> PaperSetupResolution:
+    return PaperSetupResolution(
+        changed=True,
+        outcome=outcome,
+        entry_reached=entry_reached,
+        entry_reached_at=entry_reached_at,
+        outcome_at=datetime.now(timezone.utc),
+        outcome_candle_at=candle_time,
+        outcome_price=outcome_price,
+        r_multiple=r_multiple,
+        duration_hours=max(0.0, (candle_time - closed_at).total_seconds() / 3600.0),
+    )
+
+
+def _unchanged(
+    outcome: str,
+    entry_reached: bool,
+    entry_reached_at: datetime | None,
+) -> PaperSetupResolution:
+    return PaperSetupResolution(
+        changed=False,
+        outcome=outcome,
+        entry_reached=entry_reached,
+        entry_reached_at=entry_reached_at,
+        outcome_at=None,
+        outcome_candle_at=None,
+        outcome_price=None,
+        r_multiple=None,
+        duration_hours=None,
+    )
+
+
+def _expired_r_multiple(
+    side: str,
+    entry: float,
+    stop: float,
+    target: float,
+    close: float,
+) -> float:
+    stop_distance = abs(entry - stop)
+    reward_to_risk = _reward_to_risk(entry, stop, target)
+    if stop_distance <= 0:
+        return 0.0
+    if side == "LONG":
+        value = (close - entry) / stop_distance
+    else:
+        value = (entry - close) / stop_distance
+    return max(-1.0, min(reward_to_risk, value))
+
+
+def _stats(rows: list[dict[str, Any]]) -> PaperSetupStats:
+    open_count = sum(1 for row in rows if row.get("outcome") == OUTCOME_OPEN)
+    tp_count = sum(1 for row in rows if row.get("outcome") == OUTCOME_TP)
+    sl_count = sum(1 for row in rows if row.get("outcome") == OUTCOME_SL)
+    expired_count = sum(
+        1 for row in rows if row.get("outcome") in {OUTCOME_EXPIRED, "CLOSED"}
+    )
+    closed_count = tp_count + sl_count + expired_count
+    r_values: list[float] = []
+    durations: list[float] = []
+    for row in rows:
+        if row.get("outcome") == OUTCOME_OPEN:
+            continue
+        r_value = _finite_or_none(row.get("r_multiple"))
+        if r_value is not None:
+            r_values.append(r_value)
+        duration = _finite_or_none(row.get("duration_hours"))
+        if duration is not None:
+            durations.append(duration)
+    return PaperSetupStats(
+        total_setups=len(rows),
+        open_count=open_count,
+        tp_count=tp_count,
+        sl_count=sl_count,
+        expired_count=expired_count,
+        win_rate=tp_count / closed_count if closed_count else None,
+        expected_r=sum(r_values) / len(r_values) if r_values else None,
+        average_time_to_outcome_hours=(
+            sum(durations) / len(durations) if durations else None
+        ),
+    )
+
+
+def _stats_line(label: str, stats: PaperSetupStats) -> str:
+    return (
+        f"{label}: total={stats.total_setups}"
+        f" open={stats.open_count}"
+        f" TP={stats.tp_count}"
+        f" SL={stats.sl_count}"
+        f" expired={stats.expired_count}"
+        f" win={_pct(stats.win_rate)}"
+        f" expR={_signed(stats.expected_r)}"
+        f" avg_time={_hours(stats.average_time_to_outcome_hours)}"
+    )
+
+
+def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    payload["entry_reached"] = bool(payload.get("entry_reached"))
+    for key in ("signal_json", "market_context_json", "probability_forecast_json", "setup_json"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            try:
+                payload[key.removesuffix("_json")] = json.loads(value)
+            except json.JSONDecodeError:
+                payload[key.removesuffix("_json")] = None
+    return payload
+
+
+def _setup_key(
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    candle_time: datetime,
+    side: str,
+    entry: float,
+    stop: float,
+    target: float,
+) -> str:
+    return "|".join(
+        (
+            exchange,
+            symbol,
+            timeframe,
+            _iso(candle_time) or "",
+            side,
+            f"{entry:.8f}",
+            f"{stop:.8f}",
+            f"{target:.8f}",
+        )
+    )
+
+
+def _context_labels(
+    market_context: MarketContext | None,
+) -> tuple[str | None, str | None, str | None]:
+    if market_context is None:
+        return None, None, None
+    volatility = market_context.volatility_regime
+    structure = market_context.structure_regime
+    return f"{volatility} / {structure}", volatility, structure
+
+
+def _reward_to_risk(entry: float, stop: float, target: float) -> float:
+    stop_distance = abs(entry - stop)
+    if stop_distance <= 0:
+        return 0.0
+    return abs(target - entry) / stop_distance
+
+
+def _score_bucket(score: float | None) -> str:
+    if score is None:
+        return "unknown"
+    if score >= 0.65:
+        return ">= +0.65"
+    if score >= 0.25:
+        return "+0.25 to +0.65"
+    if score > -0.25:
+        return "-0.25 to +0.25"
+    if score > -0.65:
+        return "-0.65 to -0.25"
+    return "<= -0.65"
+
+
+def _parse_datetime_or_none(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    return _parse_datetime(value)
+
+
+def _parse_datetime(value: Any) -> datetime:
+    if hasattr(value, "to_pydatetime"):
+        value = value.to_pydatetime()
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    number = _finite_or_none(value)
+    if number is None:
+        raise TypeError("Invalid datetime value")
+    if number > 100_000_000_000:
+        number /= 1000.0
+    return datetime.fromtimestamp(number, tz=timezone.utc)
+
+
+def _iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(
+        value,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return _iso(value)
+    if is_dataclass(value):
+        return {
+            field.name: _jsonable(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
+
+
+def _finite_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _pct(value: float | None) -> str:
+    return "N/A" if value is None else f"{value * 100:.1f}%"
+
+
+def _signed(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:+.2f}"
+
+
+def _hours(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.1f}h"
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

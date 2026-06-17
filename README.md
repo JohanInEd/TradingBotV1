@@ -172,10 +172,18 @@ not place trades.
 | `BOT_MAX_POSITION_FRACTION` | `0.25` | Maximum margin allocation |
 | `BOT_PRICE_RANGE_HORIZON_HOURS` | `24` | Historical low/high estimate horizon |
 | `BOT_PRICE_RANGE_LOOKBACK_CANDLES` | `180` | Recent 4h candles used for range samples |
+| `BOT_PROBABILITY_HORIZON_HOURS` | `24` | Horizon for candle-only directional and TP/SL probability |
+| `BOT_PROBABILITY_LOOKBACK_CANDLES` | `220` | Recent 4h candles used to find similar technical setups |
+| `BOT_PROBABILITY_MIN_SAMPLES` | `30` | Minimum preferred similar samples before confidence is considered useful |
+| `BOT_PROBABILITY_MAX_SAMPLES` | `120` | Maximum nearest historical setups used in the probability estimate |
 | `BOT_SHAKEOUT_WINDOW_SECONDS` | `300` | Rolling window for order-flow and liquidation stress |
 | `BOT_SHAKEOUT_BASELINE_WINDOW_SECONDS` | `3600` | Recent history used to normalize shakeout stress against local baselines |
 | `BOT_WHALE_TRADE_USD` | `1000000` | Minimum notional for a large taker trade alert |
 | `BOT_SHAKEOUT_EVENT_LOG` | unset | Optional JSONL file for recording shakeout inputs and replay analysis |
+| `BOT_SIGNAL_JOURNAL_PATH` | unset | Optional JSONL file for closed-candle signal evaluations and later outcome analysis |
+| `BOT_PAPER_SETUP_JOURNAL_PATH` | unset | Optional SQLite file for closed-candle GO LONG / GO SHORT paper setup tracking |
+| `BOT_PAPER_SETUP_HORIZON_HOURS` | `24` | Hours before an unresolved paper setup is marked `EXPIRED` |
+| `BOT_HISTORY_DB_PATH` | unset | Optional SQLite file for public OHLCV history used by offline analysis and probability calibration |
 
 To record live public depth, aggregate trade, liquidation, open-interest, and
 top-trader crowding inputs for later shakeout review:
@@ -200,6 +208,111 @@ the peak-score delta. Use `--window-seconds`, `--baseline-window-seconds`, or
 replay does not change the live signal matrix and does not create trade
 triggers.
 
+To keep a local journal of each closed-candle evaluation, set
+`BOT_SIGNAL_JOURNAL_PATH` before running the terminal bot or web API:
+
+```powershell
+$env:BOT_SIGNAL_JOURNAL_PATH = "data/signal-journal.jsonl"
+btc-tri-factor-web
+```
+
+The journal appends one JSONL row per exchange, symbol, timeframe, and closed
+candle timestamp. Rows include the closed candle OHLC, technical score, final
+signal, paper futures guidance, sentiment and macro state, market context,
+futures/shakeout context, and probability forecast. Duplicate rows for the same
+closed candle are skipped.
+
+Replay the journal after enough future candles have been recorded:
+
+```powershell
+btc-signal-journal data/signal-journal.jsonl
+```
+
+The analyzer reports completed 24-hour samples, direction accuracy, signaled
+win rate, TP/SL-first outcomes for hypothetical long and short plans, expected
+R, and grouped counts by signal, score bucket, sentiment, macro risk, market
+regime, and futures/shakeout context. This is an offline analysis tool only; it
+does not place orders or change live signal behavior.
+
+To record only the closed-candle setups where the current futures guidance is
+`GO LONG` or `GO SHORT`, set a paper setup journal path:
+
+```powershell
+$env:BOT_EXCHANGE = "binance-usdm"
+$env:BOT_PAPER_SETUP_JOURNAL_PATH = "data/paper-setups.sqlite"
+$env:BOT_PAPER_SETUP_HORIZON_HOURS = "24"
+btc-tri-factor-web
+```
+
+The web dashboard shows a clearly labeled `paper setup` card when a closed
+candle produces `GO LONG` or `GO SHORT`. It displays the paper entry, stop loss,
+take profit, reward/risk, max loss, and position estimate from the existing
+paper futures guidance. The card explicitly says `no order placed` and `not
+financial advice`. When guidance is `STAY FLAT`, the dashboard keeps this area
+compact and does not imply a paper trade is active.
+
+The setup journal stores public-market-data audit fields for each setup:
+exchange, symbol, timeframe, closed candle timestamp, signal time, side, entry,
+stop loss, take profit, close price, technical score, futures action, market
+context, probability forecast, and outcome columns. Duplicate setup rows are
+skipped using exchange, symbol, timeframe, closed candle timestamp, side, entry,
+stop loss, and take profit.
+
+Outcome resolution uses only public OHLCV candles. During live evaluation the
+bot queries only unresolved setup rows for the current market/timeframe and
+checks them against the recent closed-candle window, keeping memory bounded.
+Outcomes are `OPEN`, `TP`, `SL`, or `EXPIRED`. A setup is `TP` when take profit
+is hit before stop loss, `SL` when stop loss is hit before take profit, and
+`EXPIRED` when the configured horizon passes without either exit. The
+conservative same-candle rule is: if TP and SL are both inside one public candle
+after entry is observed, the journal records `SL` because intrabar order is
+unknown.
+
+Analyze recorded paper setups with:
+
+```powershell
+btc-paper-setups data/paper-setups.sqlite
+```
+
+The analyzer reports total setups, open setups, TP count, SL count, expired
+count, win rate, expected R, average time to outcome, and grouped results by
+side, score bucket, market regime, volatility regime, and trend/range context.
+This paper setup layer is still signal-only and paper-only. It does not request
+exchange credentials, call private APIs, place real orders, or auto-trade.
+
+To keep a local store of public historical candles, set `BOT_HISTORY_DB_PATH`
+and run `btc-history-sync` for the exchange, symbol, and timeframes you want to
+cache:
+
+```powershell
+$env:BOT_HISTORY_DB_PATH = "data/history.sqlite"
+btc-history-sync --exchange binance-usdm --symbol BTC/USDT:USDT --timeframes 1h,4h,1d
+```
+
+The recommended timeframes are `1h`, `4h`, and `1d`: 1-hour candles support
+entry-timing research, 4-hour candles match the official signal/probability
+analysis, and daily candles provide trend context. The sync command stores only
+public OHLCV candles in SQLite, deduplicated by exchange, symbol, timeframe,
+and timestamp. It does not request exchange credentials, place orders, or trade.
+
+When `BOT_HISTORY_DB_PATH` is set and enough continuous local 4-hour history is
+available, the live probability backtest uses a bounded recent slice from the
+SQLite store plus the current exchange-fetched candle window. If local history
+is missing or too short, it falls back to the existing exchange-fetched window.
+Signal thresholds and paper guidance are unchanged.
+
+Analyze stored public candle history without fetching new data:
+
+```powershell
+btc-history-sync --analyze --exchange binance-usdm --symbol BTC/USDT:USDT --timeframes 1h,4h,1d
+```
+
+The analyzer computes EMA 20/50, RSI 14, MACD, ATR percent, Bollinger width,
+realized volatility, range position, trend spread, 4h/12h/24h forward movement,
+long and short TP/SL first-hit outcomes, and expected R. Results are grouped by
+timeframe, score bucket, market regime, volatility regime, trend/range context,
+future movement bucket, and long/short TP/SL outcome.
+
 ## Test
 
 ```powershell
@@ -216,6 +329,7 @@ The bot is organized as a small Python package with these responsibilities:
 - `news.py`: Bitcoin sentiment and macro-risk analysis.
 - `strategy.py`: weighted tri-factor score and final signal classification.
 - `futures.py`: long/short/flat guidance and risk-based paper sizing.
+- `backtest.py`: candle-only historical probability and TP/SL calibration.
 - `microstructure.py`: rolling order-book, taker-flow, liquidation, and open-interest shakeout risk.
 - `market_context.py`: volatility regime, range position, and trend/range context.
 - `app.py`: evaluation scheduling and service orchestration.
@@ -251,6 +365,14 @@ API or third-party charting package.
 The evaluation also estimates a historical low/high range for the next 24 hours
 by reviewing prior forward windows from recent 4-hour candles. This is a
 probabilistic support/resistance context, not a guaranteed forecast.
+
+The evaluation also runs a candle-only probability backtest against recent
+similar 4-hour technical setups. It reports the historical odds that price
+closed up or down over the configured horizon, whether a paper long or short
+would have reached take-profit before stop-loss, and the expected R multiple
+for each side. This probability layer calibrates the current technical setup
+from candle history only; it does not reconstruct historical news or macro
+sentiment unless those are separately recorded in a live journal.
 
 In Binance USD-M mode, the live stream additionally subscribes to public
 top-of-book depth, aggregate market trades, and force-liquidation snapshots.

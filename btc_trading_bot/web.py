@@ -33,6 +33,7 @@ from btc_trading_bot.models import (
     RefreshHealth,
     SentimentAnalysis,
 )
+from btc_trading_bot.paper_setups import build_current_paper_setup
 from btc_trading_bot.realtime import RealtimeMarketStream
 from btc_trading_bot.strategy import calculate_signal
 
@@ -201,21 +202,34 @@ class WebStateService:
                     evaluation.macro,
                     self.settings,
                 )
+                futures = build_futures_recommendation(
+                    signal, evaluation.market, self.settings
+                )
+                paper_setup = build_current_paper_setup(
+                    futures=futures,
+                    technical=technical,
+                    evaluated_at=now,
+                    settings=self.settings,
+                    market_context=self.service.market_context,
+                    probability_forecast=self.service.probability_forecast,
+                )
                 evaluation = replace(
                     evaluation,
                     technical=technical,
                     live_technical=None,
                     signal=signal,
-                    futures=build_futures_recommendation(
-                        signal, evaluation.market, self.settings
-                    ),
+                    futures=futures,
+                    paper_setup=paper_setup,
                     price_range=self.service.price_range,
+                    probability_forecast=self.service.probability_forecast,
                     market_context=self.service.market_context,
                     evaluated_at=now,
                 )
                 self._next_analysis = next_analysis_boundary(
                     now, self.settings.analysis_interval_hours
                 )
+                self.service.record_signal_evaluation(evaluation)
+                self.service.record_paper_setup(evaluation)
             except Exception as exc:
                 evaluation = _with_error(
                     evaluation, f"Analysis refresh failed: {exc}"

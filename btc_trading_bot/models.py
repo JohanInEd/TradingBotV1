@@ -62,6 +62,9 @@ class TechnicalAnalysis:
     base_score: float | None = None
     daily_trend: TimeframeConfirmation | None = None
     hourly_entry: TimeframeConfirmation | None = None
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +119,34 @@ class FuturesRecommendation:
 
 
 @dataclass(frozen=True, slots=True)
+class PaperSetup:
+    label: str
+    side: str
+    action: str
+    status: str
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    reward_to_risk: float
+    quantity_btc: float
+    notional: float
+    max_loss: float
+    leverage: int
+    position_estimate: str
+    signal_time: datetime
+    candle_time: datetime
+    close_price: float
+    technical_score: float
+    futures_action: str
+    market_regime: str | None = None
+    volatility_regime: str | None = None
+    trend_range_context: str | None = None
+    probability_method: str | None = None
+    outcome: str = "OPEN"
+    disclaimer: str = "paper setup only; no order placed; not financial advice"
+
+
+@dataclass(frozen=True, slots=True)
 class PriceRangeForecast:
     horizon_hours: int
     expected_low: float
@@ -126,6 +157,26 @@ class PriceRangeForecast:
     upside_percent: float
     confidence: str
     sample_size: int
+    method: str
+    generated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ProbabilityForecast:
+    horizon_hours: int
+    up_probability: float
+    down_probability: float
+    flat_probability: float
+    long_tp_before_sl_probability: float
+    long_sl_before_tp_probability: float
+    short_tp_before_sl_probability: float
+    short_sl_before_tp_probability: float
+    expected_long_r: float
+    expected_short_r: float
+    average_forward_return_percent: float
+    sample_size: int
+    candidate_count: int
+    confidence: str
     method: str
     generated_at: datetime
 
@@ -193,8 +244,10 @@ class Evaluation:
     stream_status: str = "REST"
     stream_updated_at: datetime | None = None
     futures: FuturesRecommendation | None = None
+    paper_setup: PaperSetup | None = None
     futures_metrics: FuturesMetrics | None = None
     price_range: PriceRangeForecast | None = None
+    probability_forecast: ProbabilityForecast | None = None
     market_context: MarketContext | None = None
     shakeout: ShakeoutAnalysis | None = None
     market_health: RefreshHealth = field(default_factory=RefreshHealth)

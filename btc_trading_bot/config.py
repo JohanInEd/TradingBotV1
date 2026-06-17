@@ -72,10 +72,18 @@ class Settings:
     max_position_fraction: float = 0.25
     price_range_horizon_hours: int = 24
     price_range_lookback_candles: int = 180
+    probability_horizon_hours: int = 24
+    probability_lookback_candles: int = 220
+    probability_min_samples: int = 30
+    probability_max_samples: int = 120
     shakeout_window_seconds: int = 300
     shakeout_baseline_window_seconds: int = 3600
     whale_trade_usd: float = 1_000_000.0
     shakeout_event_log_path: Path | None = None
+    signal_journal_path: Path | None = None
+    paper_setup_journal_path: Path | None = None
+    paper_setup_horizon_hours: int = 24
+    history_db_path: Path | None = None
     feeds: tuple[NewsFeed, ...] = field(default_factory=lambda: DEFAULT_FEEDS)
 
     @classmethod
@@ -117,6 +125,18 @@ class Settings:
             price_range_lookback_candles=_env_int(
                 "BOT_PRICE_RANGE_LOOKBACK_CANDLES", 180, minimum=60, maximum=1000
             ),
+            probability_horizon_hours=_env_int(
+                "BOT_PROBABILITY_HORIZON_HOURS", 24, minimum=4, maximum=168
+            ),
+            probability_lookback_candles=_env_int(
+                "BOT_PROBABILITY_LOOKBACK_CANDLES", 220, minimum=80, maximum=1000
+            ),
+            probability_min_samples=_env_int(
+                "BOT_PROBABILITY_MIN_SAMPLES", 30, minimum=5, maximum=500
+            ),
+            probability_max_samples=_env_int(
+                "BOT_PROBABILITY_MAX_SAMPLES", 120, minimum=10, maximum=500
+            ),
             shakeout_window_seconds=_env_int(
                 "BOT_SHAKEOUT_WINDOW_SECONDS", 300, minimum=60, maximum=1800
             ),
@@ -130,6 +150,12 @@ class Settings:
                 "BOT_WHALE_TRADE_USD", 1_000_000.0, minimum=10_000.0
             ),
             shakeout_event_log_path=_env_path("BOT_SHAKEOUT_EVENT_LOG"),
+            signal_journal_path=_env_path("BOT_SIGNAL_JOURNAL_PATH"),
+            paper_setup_journal_path=_env_path("BOT_PAPER_SETUP_JOURNAL_PATH"),
+            paper_setup_horizon_hours=_env_int(
+                "BOT_PAPER_SETUP_HORIZON_HOURS", 24, minimum=4, maximum=168
+            ),
+            history_db_path=_env_path("BOT_HISTORY_DB_PATH"),
         )
 
 

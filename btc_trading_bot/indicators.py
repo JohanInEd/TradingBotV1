@@ -67,6 +67,9 @@ def analyze_technicals(candles: pd.DataFrame) -> TechnicalAnalysis:
         macd_histogram=float(current["macd_histogram"]),
         macd_status=macd_status,
         score=score,
+        open=_optional_float(current.get("open")),
+        high=_optional_float(current.get("high")),
+        low=_optional_float(current.get("low")),
     )
 
 
@@ -196,6 +199,14 @@ def _numeric_or_close(
 
 
 def _finite_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _optional_float(value: Any) -> float | None:
     try:
         number = float(value)
     except (TypeError, ValueError):

@@ -12,6 +12,11 @@ from typing import Any
 from rich.console import Console
 from rich.live import Live
 
+from btc_trading_bot.backtest import (
+    ProbabilityBacktestError,
+    ProbabilityBacktestSettings,
+    forecast_probability,
+)
 from btc_trading_bot.config import Settings
 from btc_trading_bot.dashboard import build_dashboard, build_static_report
 from btc_trading_bot.exchange import (
@@ -20,6 +25,7 @@ from btc_trading_bot.exchange import (
     merge_candle_update,
 )
 from btc_trading_bot.futures import build_futures_recommendation
+from btc_trading_bot.history import HistoryStore, recent_contiguous_candles
 from btc_trading_bot.indicators import analyze_multi_timeframe, build_chart_indicators
 from btc_trading_bot.market_context import analyze_market_context
 from btc_trading_bot.models import (
@@ -38,8 +44,13 @@ from btc_trading_bot.news import (
     neutral_macro,
     neutral_sentiment,
 )
+from btc_trading_bot.paper_setups import (
+    PaperSetupJournal,
+    build_current_paper_setup,
+)
 from btc_trading_bot.price_range import PriceRangeSettings, forecast_price_range
 from btc_trading_bot.realtime import RealtimeMarketStream, StreamEvent
+from btc_trading_bot.signal_journal import SignalJournalRecorder
 from btc_trading_bot.strategy import calculate_signal
 
 LOGGER = logging.getLogger(__name__)
@@ -52,11 +63,25 @@ class BotService:
         self.news = NewsAnalyzer(settings)
         self._live_candles: dict[str, Any] = {}
         self._price_range = None
+        self._probability_forecast = None
         self._market_context = None
         self.shakeout = ShakeoutMonitor(settings)
         self._shakeout_recorder = (
             ShakeoutEventRecorder(settings.shakeout_event_log_path)
             if settings.shakeout_event_log_path is not None
+            else None
+        )
+        self._signal_journal = (
+            SignalJournalRecorder(settings.signal_journal_path)
+            if settings.signal_journal_path is not None
+            else None
+        )
+        self._paper_setup_journal = (
+            PaperSetupJournal(
+                settings.paper_setup_journal_path,
+                horizon_hours=settings.paper_setup_horizon_hours,
+            )
+            if settings.paper_setup_journal_path is not None
             else None
         )
 
@@ -77,17 +102,25 @@ class BotService:
         shakeout = self.apply_futures_metrics(
             futures_metrics, datetime.now(timezone.utc)
         )
-        signal = calculate_signal(technical, sentiment, macro, self.settings)
         evaluated_at = datetime.now(timezone.utc)
-        return Evaluation(
+        signal = calculate_signal(technical, sentiment, macro, self.settings)
+        futures = build_futures_recommendation(signal, market, self.settings)
+        paper_setup = build_current_paper_setup(
+            futures=futures,
+            technical=technical,
+            evaluated_at=evaluated_at,
+            settings=self.settings,
+            market_context=self._market_context,
+            probability_forecast=self._probability_forecast,
+        )
+        evaluation = Evaluation(
             market=market,
             technical=technical,
             sentiment=sentiment,
             macro=macro,
             signal=signal,
-            futures=build_futures_recommendation(
-                signal, market, self.settings
-            ),
+            futures=futures,
+            paper_setup=paper_setup,
             evaluated_at=evaluated_at,
             next_analysis_at=next_analysis_boundary(
                 evaluated_at, self.settings.analysis_interval_hours
@@ -96,6 +129,7 @@ class BotService:
             news_updated_at=evaluated_at if news_succeeded else None,
             futures_metrics=futures_metrics,
             price_range=self._price_range,
+            probability_forecast=self._probability_forecast,
             market_context=self._market_context,
             shakeout=shakeout,
             market_health=RefreshHealth(
@@ -116,6 +150,9 @@ class BotService:
                 attempted_at=evaluated_at,
             ),
         )
+        self.record_signal_evaluation(evaluation)
+        self.record_paper_setup(evaluation)
+        return evaluation
 
     def refresh_technicals(self) -> TechnicalAnalysis:
         four_hour_candles = self.exchange.fetch_closed_candles(
@@ -140,12 +177,42 @@ class BotService:
                 lookback_candles=self.settings.price_range_lookback_candles,
             ),
         )
+        try:
+            horizon_candles = max(
+                1, (self.settings.probability_horizon_hours + 3) // 4
+            )
+            self._probability_forecast = forecast_probability(
+                _probability_candles_for_backtest(
+                    self.settings,
+                    self.exchange.id,
+                    self.exchange.symbol,
+                    four_hour_candles,
+                    horizon_candles=horizon_candles,
+                ),
+                ProbabilityBacktestSettings(
+                    horizon_hours=self.settings.probability_horizon_hours,
+                    horizon_candles=horizon_candles,
+                    lookback_candles=self.settings.probability_lookback_candles,
+                    min_samples=self.settings.probability_min_samples,
+                    max_samples=self.settings.probability_max_samples,
+                ),
+                stop_loss_percent=self.settings.stop_loss_percent,
+                reward_to_risk=self.settings.reward_to_risk,
+            )
+        except ProbabilityBacktestError as exc:
+            LOGGER.warning("Probability backtest unavailable: %s", exc)
+            self._probability_forecast = None
         self._market_context = analyze_market_context(four_hour_candles)
+        self.resolve_paper_setups(four_hour_candles)
         return self._analyze_candles(self._live_candles)
 
     @property
     def price_range(self):
         return self._price_range
+
+    @property
+    def probability_forecast(self):
+        return self._probability_forecast
 
     @property
     def market_context(self):
@@ -248,8 +315,51 @@ class BotService:
             analysis=analysis,
         )
 
+    def record_signal_evaluation(self, evaluation: Evaluation) -> None:
+        if self._signal_journal is None:
+            return
+        try:
+            self._signal_journal.record(
+                evaluation,
+                exchange=self.exchange.id,
+                symbol=self.exchange.symbol,
+                timeframe=self.settings.timeframe,
+                settings=self.settings,
+            )
+        except Exception as exc:
+            LOGGER.warning("Signal journal write failed: %s", exc)
+
+    def record_paper_setup(self, evaluation: Evaluation) -> None:
+        if self._paper_setup_journal is None:
+            return
+        try:
+            self._paper_setup_journal.record(
+                evaluation,
+                exchange=self.exchange.id,
+                symbol=self.exchange.symbol,
+                timeframe=self.settings.timeframe,
+                settings=self.settings,
+            )
+        except Exception as exc:
+            LOGGER.warning("Paper setup journal write failed: %s", exc)
+
+    def resolve_paper_setups(self, candles: Any) -> None:
+        if self._paper_setup_journal is None:
+            return
+        try:
+            self._paper_setup_journal.resolve_with_candles(
+                candles,
+                exchange=self.exchange.id,
+                symbol=self.exchange.symbol,
+                timeframe=self.settings.timeframe,
+            )
+        except Exception as exc:
+            LOGGER.warning("Paper setup outcome resolution failed: %s", exc)
+
     def close(self) -> None:
         self.news.close()
+        if self._paper_setup_journal is not None:
+            self._paper_setup_journal.close()
         self.exchange.close()
 
 
@@ -258,6 +368,44 @@ def next_analysis_boundary(now: datetime, interval_hours: int) -> datetime:
     boundary_hour = ((now.hour // interval_hours) + 1) * interval_hours
     boundary_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     return boundary_day + timedelta(hours=boundary_hour)
+
+
+def _probability_candles_for_backtest(
+    settings: Settings,
+    exchange: str,
+    symbol: str,
+    live_candles: Any,
+    *,
+    horizon_candles: int,
+):
+    if settings.history_db_path is None:
+        return live_candles
+    required = settings.probability_lookback_candles + horizon_candles + 80
+    try:
+        with HistoryStore(settings.history_db_path) as store:
+            stored = store.load_candles(
+                exchange,
+                symbol,
+                settings.timeframe,
+                limit=required,
+            )
+    except Exception as exc:
+        LOGGER.warning("Local probability history unavailable: %s", exc)
+        return live_candles
+    if len(stored) < required:
+        return live_candles
+
+    import pandas as pd
+
+    merged = (
+        pd.concat([stored, live_candles], ignore_index=True)
+        .drop_duplicates("timestamp", keep="last")
+        .sort_values("timestamp")
+    )
+    contiguous = recent_contiguous_candles(merged, settings.timeframe)
+    if len(contiguous) < required:
+        return live_candles
+    return contiguous.tail(required).reset_index(drop=True)
 
 
 def run(settings: Settings, once: bool = False) -> int:
@@ -352,21 +500,34 @@ def run(settings: Settings, once: bool = False) -> int:
                             evaluation.macro,
                             settings,
                         )
+                        futures = build_futures_recommendation(
+                            signal, evaluation.market, settings
+                        )
+                        paper_setup = build_current_paper_setup(
+                            futures=futures,
+                            technical=technical,
+                            evaluated_at=now,
+                            settings=settings,
+                            market_context=service.market_context,
+                            probability_forecast=service.probability_forecast,
+                        )
                         evaluation = replace(
                             evaluation,
                             technical=technical,
                             live_technical=None,
                             signal=signal,
-                            futures=build_futures_recommendation(
-                                signal, evaluation.market, settings
-                            ),
+                            futures=futures,
+                            paper_setup=paper_setup,
                             price_range=service.price_range,
+                            probability_forecast=service.probability_forecast,
                             market_context=service.market_context,
                             evaluated_at=now,
                         )
                         next_analysis = next_analysis_boundary(
                             now, settings.analysis_interval_hours
                         )
+                        service.record_signal_evaluation(evaluation)
+                        service.record_paper_setup(evaluation)
                     except Exception as exc:
                         evaluation = _with_error(
                             evaluation, f"Analysis refresh failed: {exc}"
@@ -640,17 +801,23 @@ def _apply_news_refresh(
             ),
         )
 
-    signal = calculate_signal(
-        current.technical, sentiment, macro, settings
+    signal = calculate_signal(current.technical, sentiment, macro, settings)
+    futures = build_futures_recommendation(signal, current.market, settings)
+    paper_setup = build_current_paper_setup(
+        futures=futures,
+        technical=current.technical,
+        evaluated_at=updated_at,
+        settings=settings,
+        market_context=current.market_context,
+        probability_forecast=current.probability_forecast,
     )
     return replace(
         current,
         sentiment=sentiment,
         macro=macro,
         signal=signal,
-        futures=build_futures_recommendation(
-            signal, current.market, settings
-        ),
+        futures=futures,
+        paper_setup=paper_setup,
         evaluated_at=updated_at,
         news_updated_at=updated_at,
         news_health=_completed_health(

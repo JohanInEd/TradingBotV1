@@ -119,6 +119,14 @@ class FuturesRecommendation:
 
 
 @dataclass(frozen=True, slots=True)
+class TradeFilterResult:
+    status: str
+    allowed: bool
+    original_action: str
+    reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class PaperSetup:
     label: str
     side: str
@@ -179,6 +187,30 @@ class ProbabilityForecast:
     confidence: str
     method: str
     generated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioPathPoint:
+    time: datetime
+    price: float
+    percent_change: float
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioForecast:
+    horizon_hours: int
+    sample_size: int
+    candidate_count: int
+    confidence: str
+    method: str
+    generated_at: datetime
+    up_probability: float
+    down_probability: float
+    median_path: tuple[ScenarioPathPoint, ...]
+    lower_band_path: tuple[ScenarioPathPoint, ...]
+    upper_band_path: tuple[ScenarioPathPoint, ...]
+    expected_low: float
+    expected_high: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,10 +276,12 @@ class Evaluation:
     stream_status: str = "REST"
     stream_updated_at: datetime | None = None
     futures: FuturesRecommendation | None = None
+    trade_filter: TradeFilterResult | None = None
     paper_setup: PaperSetup | None = None
     futures_metrics: FuturesMetrics | None = None
     price_range: PriceRangeForecast | None = None
     probability_forecast: ProbabilityForecast | None = None
+    scenario_forecast: ScenarioForecast | None = None
     market_context: MarketContext | None = None
     shakeout: ShakeoutAnalysis | None = None
     market_health: RefreshHealth = field(default_factory=RefreshHealth)

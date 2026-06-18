@@ -152,6 +152,14 @@ paper futures guidance. This chart is designed to make confirmation and risk
 context easier to read; it does not make predictions with certainty and does
 not place trades.
 
+The Long / Short Map also includes a muted 7-day scenario overlay built from
+historical closed 4-hour candle setups with similar technical score, EMA trend,
+RSI, MACD histogram, ATR/volatility context, and range position. It maps
+historical percent-change paths onto the current BTC price to draw a median
+path and probability band for the next 168 hours, plus up/down odds, confidence,
+and sample counts. It is labeled as historical scenario analysis, not a
+prediction, and remains paper-only/informational.
+
 ## Configuration
 
 | Environment variable | Default | Description |
@@ -176,6 +184,14 @@ not place trades.
 | `BOT_PROBABILITY_LOOKBACK_CANDLES` | `220` | Recent 4h candles used to find similar technical setups |
 | `BOT_PROBABILITY_MIN_SAMPLES` | `30` | Minimum preferred similar samples before confidence is considered useful |
 | `BOT_PROBABILITY_MAX_SAMPLES` | `120` | Maximum nearest historical setups used in the probability estimate |
+| `BOT_DO_NOT_TRADE_FILTERS` | `true` | Enable risk gates that can block confirmed paper futures guidance |
+| `BOT_TRADE_FILTER_REQUIRE_PROBABILITY` | `false` | Require probability forecast availability before allowing a paper setup |
+| `BOT_TRADE_FILTER_MIN_PROBABILITY_SAMPLES` | `30` | Minimum similar samples required when probability data is available |
+| `BOT_TRADE_FILTER_MIN_EXPECTED_R` | `0.0` | Minimum side-specific expected R before allowing a paper setup |
+| `BOT_TRADE_FILTER_MAX_ATR_PERCENT` | `3.0` | Maximum 4h ATR percent allowed before blocking a paper setup |
+| `BOT_TRADE_FILTER_RANGE_EXTREME_PERCENT` | `85.0` | Upper/lower 50-candle range extreme used to avoid chasing entries |
+| `BOT_TRADE_FILTER_FUNDING_EXTREME` | `0.0005` | Funding threshold used with crowding to block stretched futures positioning |
+| `BOT_TRADE_FILTER_LONG_SHORT_EXTREME` | `1.8` | Long/short crowding threshold, inverted for crowded shorts |
 | `BOT_SHAKEOUT_WINDOW_SECONDS` | `300` | Rolling window for order-flow and liquidation stress |
 | `BOT_SHAKEOUT_BASELINE_WINDOW_SECONDS` | `3600` | Recent history used to normalize shakeout stress against local baselines |
 | `BOT_WHALE_TRADE_USD` | `1000000` | Minimum notional for a large taker trade alert |
@@ -251,6 +267,12 @@ paper futures guidance. The card explicitly says `no order placed` and `not
 financial advice`. When guidance is `STAY FLAT`, the dashboard keeps this area
 compact and does not imply a paper trade is active.
 
+Do-not-trade filters run after a confirmed closed-candle futures setup is built.
+They can keep the raw signal intact while changing paper futures guidance to
+`STAY FLAT` when probability odds, expected R, ATR, range location, shakeout
+risk, or futures crowding are unfavorable. The dashboard shows the filter
+status and the specific reason for any blocked paper setup.
+
 The setup journal stores public-market-data audit fields for each setup:
 exchange, symbol, timeframe, closed candle timestamp, signal time, side, entry,
 stop loss, take profit, close price, technical score, futures action, market
@@ -277,6 +299,8 @@ btc-paper-setups data/paper-setups.sqlite
 The analyzer reports total setups, open setups, TP count, SL count, expired
 count, win rate, expected R, average time to outcome, and grouped results by
 side, score bucket, market regime, volatility regime, and trend/range context.
+The web dashboard also shows a compact live summary from this same SQLite
+journal when `BOT_PAPER_SETUP_JOURNAL_PATH` is set.
 This paper setup layer is still signal-only and paper-only. It does not request
 exchange credentials, call private APIs, place real orders, or auto-trade.
 
@@ -373,6 +397,13 @@ would have reached take-profit before stop-loss, and the expected R multiple
 for each side. This probability layer calibrates the current technical setup
 from candle history only; it does not reconstruct historical news or macro
 sentiment unless those are separately recorded in a live journal.
+
+The 7-day scenario map uses the same closed-candle principle over a longer
+168-hour horizon. It selects nearest historical setups, converts each following
+7-day path into percent changes, and remaps the median and 20th/80th percentile
+paths onto the latest BTC price. If there are not enough comparable historical
+paths, the API returns `null` for the scenario forecast and the dashboard keeps
+the overlay empty.
 
 In Binance USD-M mode, the live stream additionally subscribes to public
 top-of-book depth, aggregate market trades, and force-liquidation snapshots.

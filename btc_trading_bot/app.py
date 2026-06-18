@@ -46,10 +46,14 @@ from btc_trading_bot.news import (
 )
 from btc_trading_bot.paper_setups import (
     PaperSetupJournal,
+    PaperSetupReport,
+    analyze_setup_rows,
     build_current_paper_setup,
 )
 from btc_trading_bot.price_range import PriceRangeSettings, forecast_price_range
 from btc_trading_bot.realtime import RealtimeMarketStream, StreamEvent
+from btc_trading_bot.risk_filters import apply_do_not_trade_filters
+from btc_trading_bot.scenario_map import ScenarioMapSettings, forecast_scenario_map
 from btc_trading_bot.signal_journal import SignalJournalRecorder
 from btc_trading_bot.strategy import calculate_signal
 
@@ -64,6 +68,7 @@ class BotService:
         self._live_candles: dict[str, Any] = {}
         self._price_range = None
         self._probability_forecast = None
+        self._scenario_forecast = None
         self._market_context = None
         self.shakeout = ShakeoutMonitor(settings)
         self._shakeout_recorder = (
@@ -84,6 +89,8 @@ class BotService:
             if settings.paper_setup_journal_path is not None
             else None
         )
+        self._paper_setup_report: PaperSetupReport | None = None
+        self._refresh_paper_setup_report()
 
     def evaluate(self, market: MarketSnapshot | None = None) -> Evaluation:
         errors: list[str] = []
@@ -104,7 +111,14 @@ class BotService:
         )
         evaluated_at = datetime.now(timezone.utc)
         signal = calculate_signal(technical, sentiment, macro, self.settings)
-        futures = build_futures_recommendation(signal, market, self.settings)
+        futures, trade_filter = self.build_futures_plan(
+            signal,
+            market,
+            probability_forecast=self._probability_forecast,
+            market_context=self._market_context,
+            shakeout=shakeout,
+            futures_metrics=futures_metrics,
+        )
         paper_setup = build_current_paper_setup(
             futures=futures,
             technical=technical,
@@ -120,6 +134,7 @@ class BotService:
             macro=macro,
             signal=signal,
             futures=futures,
+            trade_filter=trade_filter,
             paper_setup=paper_setup,
             evaluated_at=evaluated_at,
             next_analysis_at=next_analysis_boundary(
@@ -130,6 +145,7 @@ class BotService:
             futures_metrics=futures_metrics,
             price_range=self._price_range,
             probability_forecast=self._probability_forecast,
+            scenario_forecast=self._scenario_forecast,
             market_context=self._market_context,
             shakeout=shakeout,
             market_health=RefreshHealth(
@@ -202,6 +218,30 @@ class BotService:
         except ProbabilityBacktestError as exc:
             LOGGER.warning("Probability backtest unavailable: %s", exc)
             self._probability_forecast = None
+        try:
+            scenario_horizon_hours = 168
+            scenario_horizon_candles = max(1, scenario_horizon_hours // 4)
+            self._scenario_forecast = forecast_scenario_map(
+                _probability_candles_for_backtest(
+                    self.settings,
+                    self.exchange.id,
+                    self.exchange.symbol,
+                    four_hour_candles,
+                    horizon_candles=scenario_horizon_candles,
+                ),
+                ScenarioMapSettings(
+                    horizon_hours=scenario_horizon_hours,
+                    horizon_candles=scenario_horizon_candles,
+                    lookback_candles=max(
+                        220, self.settings.probability_lookback_candles
+                    ),
+                    min_samples=self.settings.probability_min_samples,
+                    max_samples=self.settings.probability_max_samples,
+                ),
+            )
+        except Exception as exc:
+            LOGGER.warning("7-day scenario map unavailable: %s", exc)
+            self._scenario_forecast = None
         self._market_context = analyze_market_context(four_hour_candles)
         self.resolve_paper_setups(four_hour_candles)
         return self._analyze_candles(self._live_candles)
@@ -215,6 +255,10 @@ class BotService:
         return self._probability_forecast
 
     @property
+    def scenario_forecast(self):
+        return self._scenario_forecast
+
+    @property
     def market_context(self):
         return self._market_context
 
@@ -226,6 +270,29 @@ class BotService:
             "timeframe": self.settings.timeframe,
             "candles": build_chart_indicators(candles, limit=limit),
         }
+
+    def build_futures_plan(
+        self,
+        signal,
+        market: MarketSnapshot,
+        *,
+        probability_forecast=None,
+        market_context=None,
+        shakeout=None,
+        futures_metrics=None,
+    ):
+        futures = build_futures_recommendation(signal, market, self.settings)
+        return apply_do_not_trade_filters(
+            futures,
+            self.settings,
+            probability_forecast=probability_forecast,
+            market_context=market_context,
+            shakeout=shakeout,
+            futures_metrics=futures_metrics,
+        )
+
+    def paper_setup_report(self) -> PaperSetupReport | None:
+        return self._paper_setup_report
 
     def apply_live_candle(
         self, timeframe: str, row: list[Any] | tuple[Any, ...]
@@ -340,6 +407,7 @@ class BotService:
                 timeframe=self.settings.timeframe,
                 settings=self.settings,
             )
+            self._refresh_paper_setup_report()
         except Exception as exc:
             LOGGER.warning("Paper setup journal write failed: %s", exc)
 
@@ -353,8 +421,19 @@ class BotService:
                 symbol=self.exchange.symbol,
                 timeframe=self.settings.timeframe,
             )
+            self._refresh_paper_setup_report()
         except Exception as exc:
             LOGGER.warning("Paper setup outcome resolution failed: %s", exc)
+
+    def _refresh_paper_setup_report(self) -> None:
+        if self._paper_setup_journal is None:
+            return
+        try:
+            self._paper_setup_report = analyze_setup_rows(
+                self._paper_setup_journal.load_setups()
+            )
+        except Exception as exc:
+            LOGGER.warning("Paper setup report refresh failed: %s", exc)
 
     def close(self) -> None:
         self.news.close()
@@ -500,8 +579,13 @@ def run(settings: Settings, once: bool = False) -> int:
                             evaluation.macro,
                             settings,
                         )
-                        futures = build_futures_recommendation(
-                            signal, evaluation.market, settings
+                        futures, trade_filter = service.build_futures_plan(
+                            signal,
+                            evaluation.market,
+                            probability_forecast=service.probability_forecast,
+                            market_context=service.market_context,
+                            shakeout=evaluation.shakeout,
+                            futures_metrics=evaluation.futures_metrics,
                         )
                         paper_setup = build_current_paper_setup(
                             futures=futures,
@@ -517,9 +601,11 @@ def run(settings: Settings, once: bool = False) -> int:
                             live_technical=None,
                             signal=signal,
                             futures=futures,
+                            trade_filter=trade_filter,
                             paper_setup=paper_setup,
                             price_range=service.price_range,
                             probability_forecast=service.probability_forecast,
+                            scenario_forecast=service.scenario_forecast,
                             market_context=service.market_context,
                             evaluated_at=now,
                         )
@@ -635,6 +721,7 @@ def run(settings: Settings, once: bool = False) -> int:
                                 attempted_at=now,
                             ),
                         )
+                        evaluation = _apply_current_trade_filters(evaluation, service)
                     except Exception as exc:
                         evaluation = _with_error(
                             evaluation,
@@ -772,11 +859,40 @@ def _apply_stream_events(
                     ),
                     stream_updated_at=event.received_at,
                 )
+                current = _apply_current_trade_filters(current, service)
             except Exception as exc:
                 current = _with_error(
                     current, f"Microstructure update failed: {exc}"
                 )
     return current
+
+
+def _apply_current_trade_filters(
+    evaluation: Evaluation,
+    service: BotService,
+) -> Evaluation:
+    futures, trade_filter = service.build_futures_plan(
+        evaluation.signal,
+        evaluation.market,
+        probability_forecast=evaluation.probability_forecast,
+        market_context=evaluation.market_context,
+        shakeout=evaluation.shakeout,
+        futures_metrics=evaluation.futures_metrics,
+    )
+    paper_setup = build_current_paper_setup(
+        futures=futures,
+        technical=evaluation.technical,
+        evaluated_at=evaluation.evaluated_at,
+        settings=service.settings,
+        market_context=evaluation.market_context,
+        probability_forecast=evaluation.probability_forecast,
+    )
+    return replace(
+        evaluation,
+        futures=futures,
+        trade_filter=trade_filter,
+        paper_setup=paper_setup,
+    )
 
 
 def _apply_news_refresh(
@@ -802,7 +918,14 @@ def _apply_news_refresh(
         )
 
     signal = calculate_signal(current.technical, sentiment, macro, settings)
-    futures = build_futures_recommendation(signal, current.market, settings)
+    futures, trade_filter = apply_do_not_trade_filters(
+        build_futures_recommendation(signal, current.market, settings),
+        settings,
+        probability_forecast=current.probability_forecast,
+        market_context=current.market_context,
+        shakeout=current.shakeout,
+        futures_metrics=current.futures_metrics,
+    )
     paper_setup = build_current_paper_setup(
         futures=futures,
         technical=current.technical,
@@ -817,6 +940,7 @@ def _apply_news_refresh(
         macro=macro,
         signal=signal,
         futures=futures,
+        trade_filter=trade_filter,
         paper_setup=paper_setup,
         evaluated_at=updated_at,
         news_updated_at=updated_at,

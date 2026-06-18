@@ -83,6 +83,8 @@ function App() {
   const probability = evaluation?.probability_forecast;
   const marketContext = evaluation?.market_context;
   const shakeout = evaluation?.shakeout;
+  const tradeFilter = evaluation?.trade_filter;
+  const paperJournal = snapshot?.paper_journal;
 
   const allHeadlines = useMemo(() => {
     const crypto = sentiment?.headlines ?? [];
@@ -151,14 +153,22 @@ function App() {
                 detail={`${shakeout?.direction ?? "Microstructure stream"} - ${formatNumber(shakeout?.score, 2)} - ${shakeoutSignalContext(shakeout, signal)}`}
                 tone={shakeout?.status === "HIGH" ? "negative" : shakeout?.status === "MEDIUM" ? "warning" : "neutral"}
               />
+              <MetricCard
+                label="Trade Filter"
+                value={tradeFilter?.status ?? "WAITING"}
+                detail={tradeFilter?.reasons?.[0] ?? "Risk gates not evaluated yet"}
+                tone={tradeFilterTone(tradeFilter)}
+              />
             </section>
 
             <DecisionChart evaluation={evaluation} chart={chart} />
 
             <section className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
-              <SignalPanel evaluation={evaluation} futures={futures} paperSetup={paperSetup} futuresMetrics={futuresMetrics} probability={probability} priceRange={priceRange} shakeout={shakeout} />
+              <SignalPanel evaluation={evaluation} futures={futures} paperSetup={paperSetup} futuresMetrics={futuresMetrics} probability={probability} priceRange={priceRange} shakeout={shakeout} tradeFilter={tradeFilter} />
               <NewsPanel headlines={allHeadlines} />
             </section>
+
+            <PaperJournalPanel report={paperJournal} />
 
             <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
               <HealthPanel evaluation={evaluation} />
@@ -178,6 +188,7 @@ function DecisionChart({ evaluation, chart }) {
   );
   const technical = evaluation.live_technical ?? evaluation.technical;
   const decision = useMemo(() => buildDecision(evaluation), [evaluation]);
+  const scenarioForecast = evaluation.scenario_forecast;
 
   if (!candles.length) {
     return (
@@ -219,14 +230,16 @@ function DecisionChart({ evaluation, chart }) {
             currentPrice={currentPrice}
             priceRange={priceRange}
             decision={decision}
+            scenarioForecast={scenarioForecast}
           />
-          <div className="mt-4 grid gap-2 text-xs text-slate-400 sm:grid-cols-3 lg:grid-cols-6">
+          <div className="mt-4 grid gap-2 text-xs text-slate-400 sm:grid-cols-3 lg:grid-cols-7">
             <LegendItem color="bg-emerald-300" label="EMA 20" />
             <LegendItem color="bg-cyan-300" label="EMA 50" />
             <LegendItem color="bg-amber-200" label="VWAP" />
             <LegendItem color="bg-violet-300" label="Bollinger" />
             <LegendItem color="bg-slate-300" label="Support / resistance" />
             <LegendItem color={decision.markerClass} label={decision.bias} />
+            <LegendItem color="bg-slate-400" label="7d scenario" />
           </div>
         </div>
 
@@ -236,6 +249,7 @@ function DecisionChart({ evaluation, chart }) {
             <p className={`mt-2 text-3xl font-semibold ${decision.textClass}`}>{decision.bias}</p>
             <p className="mt-2 text-sm text-slate-300">{decision.reason}</p>
           </div>
+          <ScenarioMapCard forecast={scenarioForecast} />
           <div className="grid grid-cols-2 gap-3">
             <MiniStat label="RSI 14" value={formatNumber(technical.rsi14, 1)} />
             <MiniStat label="ADX 14" value={formatNumber(latest.adx14, 1)} />
@@ -296,12 +310,16 @@ function DecisionChart({ evaluation, chart }) {
   );
 }
 
-function PriceDecisionSvg({ candles, currentPrice, priceRange, decision }) {
+function PriceDecisionSvg({ candles, currentPrice, priceRange, decision, scenarioForecast }) {
   const width = 980;
   const height = 410;
   const margin = { top: 18, right: 78, bottom: 34, left: 68 };
   const innerWidth = width - margin.left - margin.right;
   const innerHeight = height - margin.top - margin.bottom;
+  const scenarioMedian = (scenarioForecast?.median_path ?? []).filter((point) => isFiniteNumber(point.price));
+  const scenarioLower = (scenarioForecast?.lower_band_path ?? []).filter((point) => isFiniteNumber(point.price));
+  const scenarioUpper = (scenarioForecast?.upper_band_path ?? []).filter((point) => isFiniteNumber(point.price));
+  const scenarioPointCount = Math.max(scenarioMedian.length, scenarioLower.length, scenarioUpper.length);
   const priceValues = candles.flatMap((candle) => [
     candle.high,
     candle.low,
@@ -316,10 +334,17 @@ function PriceDecisionSvg({ candles, currentPrice, priceRange, decision }) {
     priceRange?.expected_low,
     priceRange?.expected_high,
     priceRange?.support_level,
-    priceRange?.resistance_level
+    priceRange?.resistance_level,
+    scenarioForecast?.expected_low,
+    scenarioForecast?.expected_high,
+    ...scenarioMedian.map((point) => point.price),
+    ...scenarioLower.map((point) => point.price),
+    ...scenarioUpper.map((point) => point.price)
   );
   const [minPrice, maxPrice] = paddedDomain(priceValues, 0.08);
-  const xFor = (index) => margin.left + (candles.length <= 1 ? 0 : (index / (candles.length - 1)) * innerWidth);
+  const totalLastIndex = Math.max(candles.length - 1 + scenarioPointCount, candles.length - 1, 1);
+  const xFor = (index) => margin.left + (index / totalLastIndex) * innerWidth;
+  const scenarioXFor = (index) => xFor(candles.length - 1 + index);
   const yFor = (value) => margin.top + ((maxPrice - value) / (maxPrice - minPrice || 1)) * innerHeight;
   const candleWidth = Math.max(3, Math.min(10, innerWidth / candles.length * 0.58));
   const lineKeys = [
@@ -333,6 +358,22 @@ function PriceDecisionSvg({ candles, currentPrice, priceRange, decision }) {
   const latestX = xFor(candles.length - 1);
   const markerY = yFor(currentPrice);
   const markerColor = decision.side === "LONG" ? "#34d399" : decision.side === "SHORT" ? "#fb7185" : "#67e8f9";
+  const scenarioMedianPoints = scenarioMedian.length ? [{ price: currentPrice }, ...scenarioMedian] : [];
+  const scenarioLowerPoints = scenarioLower.length ? [{ price: currentPrice }, ...scenarioLower] : [];
+  const scenarioUpperPoints = scenarioUpper.length ? [{ price: currentPrice }, ...scenarioUpper] : [];
+  const scenarioUpperPath = pathFromPoints(scenarioUpperPoints, scenarioXFor, yFor);
+  const scenarioLowerPath = pathFromPoints(
+    [...scenarioLowerPoints].reverse(),
+    (index) => scenarioXFor(scenarioLowerPoints.length - 1 - index),
+    yFor
+  );
+  const scenarioBandPath = scenarioUpperPath && scenarioLowerPath ? `${scenarioUpperPath} L ${scenarioLowerPath.slice(2)} Z` : "";
+  const scenarioMedianPath = pathFromPoints(scenarioMedianPoints, scenarioXFor, yFor);
+  const scenarioLabelPoint = scenarioMedian[scenarioMedian.length - 1];
+  const scenarioLabelX = Math.min(width - margin.right - 82, scenarioXFor(scenarioMedianPoints.length - 1) + 8);
+  const scenarioLabelY = scenarioLabelPoint
+    ? Math.max(22, Math.min(height - 54, yFor(scenarioLabelPoint.price) - 10))
+    : 0;
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="h-auto w-full overflow-visible" role="img" aria-label="Bitcoin long short decision chart">
@@ -353,6 +394,7 @@ function PriceDecisionSvg({ candles, currentPrice, priceRange, decision }) {
       ) : null}
 
       {bandPath ? <path d={bandPath} fill="rgba(167,139,250,0.12)" stroke="rgba(167,139,250,0.35)" strokeWidth="1" /> : null}
+      {scenarioBandPath ? <path d={scenarioBandPath} fill="rgba(148,163,184,0.14)" stroke="rgba(148,163,184,0.24)" strokeWidth="1" /> : null}
 
       {candles.map((candle, index) => {
         const x = xFor(index);
@@ -385,6 +427,19 @@ function PriceDecisionSvg({ candles, currentPrice, priceRange, decision }) {
         return path ? <path key={key} d={path} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" /> : null;
       })}
 
+      {scenarioMedianPath ? (
+        <path d={scenarioMedianPath} fill="none" stroke="rgba(203,213,225,0.88)" strokeWidth="2.2" strokeDasharray="7 6" strokeLinecap="round" />
+      ) : null}
+      {scenarioMedianPath ? (
+        <line x1={latestX} x2={latestX} y1={margin.top} y2={height - margin.bottom} stroke="rgba(203,213,225,0.22)" strokeDasharray="5 7" />
+      ) : null}
+      {scenarioLabelPoint ? (
+        <g>
+          <text x={scenarioLabelX} y={scenarioLabelY} fill="rgb(203,213,225)" fontSize="12" fontWeight="700">7d scenario</text>
+          <text x={scenarioLabelX} y={scenarioLabelY + 15} fill="rgb(148,163,184)" fontSize="10">historical, not a prediction</text>
+        </g>
+      ) : null}
+
       {[
         ["Support", priceRange?.support_level, "rgba(226,232,240,0.55)"],
         ["Resistance", priceRange?.resistance_level, "rgba(226,232,240,0.55)"],
@@ -409,10 +464,32 @@ function PriceDecisionSvg({ candles, currentPrice, priceRange, decision }) {
       <text x={margin.left} y={height - 12} fill="rgb(148,163,184)" fontSize="11">
         {formatShortDate(candles[0]?.time)}
       </text>
-      <text x={width - margin.right - 92} y={height - 12} fill="rgb(148,163,184)" fontSize="11">
+      <text x={Math.max(margin.left + 82, latestX - 42)} y={height - 12} fill="rgb(148,163,184)" fontSize="11">
         {formatShortDate(candles[candles.length - 1]?.time)}
       </text>
+      {scenarioMedian.length ? (
+        <text x={width - margin.right - 92} y={height - 12} fill="rgb(148,163,184)" fontSize="11">
+          {formatShortDate(scenarioMedian[scenarioMedian.length - 1]?.time)}
+        </text>
+      ) : null}
     </svg>
+  );
+}
+
+function ScenarioMapCard({ forecast }) {
+  return (
+    <div className="rounded-2xl border border-slate-300/15 bg-slate-300/10 p-4">
+      <p className="text-xs uppercase tracking-[0.18em] text-slate-500">7d scenario</p>
+      <p className="mt-2 text-sm text-slate-300">Historical scenario from similar setups; not a prediction.</p>
+      <div className="mt-4 grid grid-cols-2 gap-2 text-sm text-slate-300">
+        <MiniLine label="Up probability" value={formatProbability(forecast?.up_probability)} />
+        <MiniLine label="Down probability" value={formatProbability(forecast?.down_probability)} />
+        <MiniLine label="Confidence" value={forecast?.confidence ?? "-"} />
+        <MiniLine label="Samples" value={forecast ? `${forecast.sample_size}/${forecast.candidate_count}` : "-"} />
+        <MiniLine label="Expected low" value={formatUsd(forecast?.expected_low)} />
+        <MiniLine label="Expected high" value={formatUsd(forecast?.expected_high)} />
+      </div>
+    </div>
   );
 }
 
@@ -550,7 +627,7 @@ function MetricCard({ label, value, detail, tone }) {
   );
 }
 
-function SignalPanel({ evaluation, futures, paperSetup, futuresMetrics, probability, priceRange, shakeout }) {
+function SignalPanel({ evaluation, futures, paperSetup, futuresMetrics, probability, priceRange, shakeout, tradeFilter }) {
   const technical = evaluation.live_technical ?? evaluation.technical;
   const shakeoutContext = shakeoutSignalContext(shakeout, evaluation.signal);
   return (
@@ -573,14 +650,16 @@ function SignalPanel({ evaluation, futures, paperSetup, futuresMetrics, probabil
 
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
         <PaperSetupCard paperSetup={paperSetup} futures={futures} />
-        <div className="rounded-2xl bg-black/20 p-4">
-          <p className="text-sm font-medium text-slate-200">Derivatives context</p>
-          <div className="mt-4 grid grid-cols-2 gap-3 text-sm text-slate-300">
-            <MiniLine label="Mark" value={formatUsd(futuresMetrics?.mark_price)} />
-            <MiniLine label="Index" value={formatUsd(futuresMetrics?.index_price)} />
-            <MiniLine label="Funding" value={formatPct((futuresMetrics?.funding_rate ?? 0) * 100, 4)} />
-            <MiniLine label="Long/short" value={formatNumber(futuresMetrics?.long_short_ratio, 2)} />
-          </div>
+        <TradeFilterCard tradeFilter={tradeFilter} />
+      </div>
+
+      <div className="mt-4 rounded-2xl bg-black/20 p-4">
+        <p className="text-sm font-medium text-slate-200">Derivatives context</p>
+        <div className="mt-4 grid grid-cols-2 gap-3 text-sm text-slate-300 md:grid-cols-4">
+          <MiniLine label="Mark" value={formatUsd(futuresMetrics?.mark_price)} />
+          <MiniLine label="Index" value={formatUsd(futuresMetrics?.index_price)} />
+          <MiniLine label="Funding" value={formatPct((futuresMetrics?.funding_rate ?? 0) * 100, 4)} />
+          <MiniLine label="Long/short" value={formatNumber(futuresMetrics?.long_short_ratio, 2)} />
         </div>
       </div>
 
@@ -727,6 +806,94 @@ function PaperSetupCard({ paperSetup, futures }) {
   );
 }
 
+function TradeFilterCard({ tradeFilter }) {
+  const status = tradeFilter?.status ?? "WAITING";
+  const reasons = tradeFilter?.reasons?.length ? tradeFilter.reasons : ["Risk gates not evaluated yet."];
+  const toneClass = tradeFilter?.status === "BLOCKED"
+    ? "border-rose-300/25 text-rose-100"
+    : tradeFilter?.status === "PASS"
+      ? "border-emerald-300/25 text-emerald-100"
+      : "border-cyan-300/25 text-cyan-100";
+
+  return (
+    <div className={`rounded-2xl border ${toneClass} bg-black/20 p-4`}>
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm font-medium text-slate-200">do-not-trade filters</p>
+        <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
+          {tradeFilter?.original_action ?? "WAITING"}
+        </span>
+      </div>
+      <p className="mt-2 text-3xl font-semibold">{status}</p>
+      <div className="mt-3 space-y-2 text-sm text-slate-300">
+        {reasons.map((reason) => (
+          <p key={reason}>{reason}</p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PaperJournalPanel({ report }) {
+  const overall = report?.overall;
+  const sideGroups = report?.groups?.side ?? {};
+  const volatilityGroups = report?.groups?.volatility_regime ?? {};
+  const sideRows = Object.entries(sideGroups).slice(0, 4);
+  const volatilityRows = Object.entries(volatilityGroups).slice(0, 4);
+
+  return (
+    <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
+      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+        <div>
+          <h2 className="text-xl font-semibold">Paper Trade Journal</h2>
+          <p className="text-sm text-slate-400">
+            {report ? `${report.total_setups} recorded setups` : "Set BOT_PAPER_SETUP_JOURNAL_PATH to collect setup outcomes."}
+          </p>
+        </div>
+        <span className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-sm text-cyan-100">
+          paper only
+        </span>
+      </div>
+
+      <div className="mt-5 grid gap-3 md:grid-cols-4">
+        <MiniStat label="Open" value={overall?.open_count ?? 0} />
+        <MiniStat label="TP / SL" value={`${overall?.tp_count ?? 0} / ${overall?.sl_count ?? 0}`} />
+        <MiniStat label="Win rate" value={formatProbability(overall?.win_rate)} />
+        <MiniStat label="Expected R" value={formatSignedNumber(overall?.expected_r, 2)} />
+      </div>
+
+      <div className="mt-5 grid gap-4 lg:grid-cols-2">
+        <JournalGroup title="By side" rows={sideRows} />
+        <JournalGroup title="By volatility" rows={volatilityRows} />
+      </div>
+    </section>
+  );
+}
+
+function JournalGroup({ title, rows }) {
+  return (
+    <div className="rounded-2xl bg-black/20 p-4">
+      <p className="text-sm font-medium text-slate-200">{title}</p>
+      <div className="mt-4 space-y-3">
+        {rows.length ? rows.map(([label, stats]) => (
+          <div key={label} className="rounded-xl bg-white/5 p-3 text-sm text-slate-300">
+            <div className="flex items-center justify-between gap-3">
+              <span className="font-medium text-slate-100">{label}</span>
+              <span>{stats.total_setups} setups</span>
+            </div>
+            <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+              <MiniLine label="TP" value={stats.tp_count} />
+              <MiniLine label="SL" value={stats.sl_count} />
+              <MiniLine label="Win" value={formatProbability(stats.win_rate)} />
+            </div>
+          </div>
+        )) : (
+          <p className="rounded-xl bg-white/5 p-3 text-sm text-slate-400">No journal rows yet.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function NewsPanel({ headlines }) {
   return (
     <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
@@ -839,11 +1006,15 @@ function buildDecision(evaluation) {
   const signal = evaluation.signal?.signal ?? "HOLD / NEUTRAL";
   const action = evaluation.futures?.action ?? "STAY FLAT";
   const probability = evaluation.probability_forecast;
-  const side = action === "GO LONG" || signal === "STRONG BUY"
+  const side = action === "GO LONG"
     ? "LONG"
-    : action === "GO SHORT" || signal === "STRONG SELL"
+    : action === "GO SHORT"
       ? "SHORT"
-      : "FLAT";
+      : !evaluation.futures && signal === "STRONG BUY"
+        ? "LONG"
+        : !evaluation.futures && signal === "STRONG SELL"
+          ? "SHORT"
+          : "FLAT";
   let long;
   let short;
   let flat;
@@ -889,6 +1060,13 @@ function buildDecision(evaluation) {
   };
 }
 
+function tradeFilterTone(tradeFilter) {
+  if (tradeFilter?.status === "PASS") return "positive";
+  if (tradeFilter?.status === "BLOCKED") return "negative";
+  if (tradeFilter?.status === "NO SETUP") return "neutral";
+  return "warning";
+}
+
 function paddedDomain(values, padding = 0.1) {
   const finite = values.filter(isFiniteNumber);
   if (!finite.length) return [0, 1];
@@ -905,6 +1083,16 @@ function paddedDomain(values, padding = 0.1) {
 function seriesPath(rows, key, xFor, yFor) {
   const points = rows
     .map((row, index) => [xFor(index), row[key]])
+    .filter(([, value]) => isFiniteNumber(value));
+  if (!points.length) return "";
+  return points
+    .map(([x, value], index) => `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${yFor(value).toFixed(2)}`)
+    .join(" ");
+}
+
+function pathFromPoints(rows, xFor, yFor) {
+  const points = rows
+    .map((row, index) => [xFor(index), row.price])
     .filter(([, value]) => isFiniteNumber(value));
   if (!points.length) return "";
   return points
@@ -964,6 +1152,12 @@ function formatProbability(value) {
 function formatNumber(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
   return Number(value).toFixed(digits);
+}
+
+function formatSignedNumber(value, digits = 2) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  const number = Number(value);
+  return `${number > 0 ? "+" : ""}${number.toFixed(digits)}`;
 }
 
 function formatRatio(value) {

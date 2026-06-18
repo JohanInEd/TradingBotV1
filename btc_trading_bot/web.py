@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 from btc_trading_bot.app import (
     BotService,
+    _apply_current_trade_filters,
     _apply_news_refresh,
     _apply_stream_events,
     _completed_health,
@@ -25,7 +26,6 @@ from btc_trading_bot.app import (
     next_analysis_boundary,
 )
 from btc_trading_bot.config import Settings
-from btc_trading_bot.futures import build_futures_recommendation
 from btc_trading_bot.models import (
     Evaluation,
     FuturesMetrics,
@@ -166,6 +166,7 @@ class WebStateService:
             "status": "ok",
             "evaluation": _jsonable(self._evaluation),
             "chart": _jsonable(self.service.chart_data()),
+            "paper_journal": _jsonable(self.service.paper_setup_report()),
             "generated_at": _jsonable(datetime.now(timezone.utc)),
         }
 
@@ -202,8 +203,13 @@ class WebStateService:
                     evaluation.macro,
                     self.settings,
                 )
-                futures = build_futures_recommendation(
-                    signal, evaluation.market, self.settings
+                futures, trade_filter = self.service.build_futures_plan(
+                    signal,
+                    evaluation.market,
+                    probability_forecast=self.service.probability_forecast,
+                    market_context=self.service.market_context,
+                    shakeout=evaluation.shakeout,
+                    futures_metrics=evaluation.futures_metrics,
                 )
                 paper_setup = build_current_paper_setup(
                     futures=futures,
@@ -219,9 +225,11 @@ class WebStateService:
                     live_technical=None,
                     signal=signal,
                     futures=futures,
+                    trade_filter=trade_filter,
                     paper_setup=paper_setup,
                     price_range=self.service.price_range,
                     probability_forecast=self.service.probability_forecast,
+                    scenario_forecast=self.service.scenario_forecast,
                     market_context=self.service.market_context,
                     evaluated_at=now,
                 )
@@ -330,6 +338,7 @@ class WebStateService:
                         attempted_at=now,
                     ),
                 )
+                evaluation = _apply_current_trade_filters(evaluation, self.service)
             except Exception as exc:
                 evaluation = _with_error(
                     evaluation, f"Futures metrics refresh failed: {exc}"

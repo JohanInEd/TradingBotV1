@@ -76,6 +76,14 @@ class Settings:
     probability_lookback_candles: int = 220
     probability_min_samples: int = 30
     probability_max_samples: int = 120
+    do_not_trade_filters_enabled: bool = True
+    trade_filter_require_probability: bool = False
+    trade_filter_min_probability_samples: int = 30
+    trade_filter_min_expected_r: float = 0.0
+    trade_filter_max_atr_percent: float = 3.0
+    trade_filter_range_extreme_percent: float = 85.0
+    trade_filter_funding_extreme: float = 0.0005
+    trade_filter_long_short_extreme: float = 1.8
     shakeout_window_seconds: int = 300
     shakeout_baseline_window_seconds: int = 3600
     whale_trade_usd: float = 1_000_000.0
@@ -137,6 +145,42 @@ class Settings:
             probability_max_samples=_env_int(
                 "BOT_PROBABILITY_MAX_SAMPLES", 120, minimum=10, maximum=500
             ),
+            do_not_trade_filters_enabled=_env_bool(
+                "BOT_DO_NOT_TRADE_FILTERS", True
+            ),
+            trade_filter_require_probability=_env_bool(
+                "BOT_TRADE_FILTER_REQUIRE_PROBABILITY", False
+            ),
+            trade_filter_min_probability_samples=_env_int(
+                "BOT_TRADE_FILTER_MIN_PROBABILITY_SAMPLES",
+                30,
+                minimum=5,
+                maximum=500,
+            ),
+            trade_filter_min_expected_r=_env_float(
+                "BOT_TRADE_FILTER_MIN_EXPECTED_R", 0.0, minimum=-1.0, maximum=5.0
+            ),
+            trade_filter_max_atr_percent=_env_float(
+                "BOT_TRADE_FILTER_MAX_ATR_PERCENT", 3.0, minimum=0.1, maximum=20.0
+            ),
+            trade_filter_range_extreme_percent=_env_float(
+                "BOT_TRADE_FILTER_RANGE_EXTREME_PERCENT",
+                85.0,
+                minimum=50.0,
+                maximum=99.0,
+            ),
+            trade_filter_funding_extreme=_env_float(
+                "BOT_TRADE_FILTER_FUNDING_EXTREME",
+                0.0005,
+                minimum=0.0,
+                maximum=0.01,
+            ),
+            trade_filter_long_short_extreme=_env_float(
+                "BOT_TRADE_FILTER_LONG_SHORT_EXTREME",
+                1.8,
+                minimum=1.0,
+                maximum=10.0,
+            ),
             shakeout_window_seconds=_env_int(
                 "BOT_SHAKEOUT_WINDOW_SECONDS", 300, minimum=60, maximum=1800
             ),
@@ -186,6 +230,13 @@ def _env_float(
         return min(maximum, value) if maximum is not None else value
     except ValueError:
         return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_path(name: str) -> Path | None:

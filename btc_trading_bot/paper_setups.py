@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import sqlite3
+import threading
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, fields, is_dataclass
@@ -77,7 +78,8 @@ class PaperSetupJournal:
         self.path = Path(path).expanduser()
         self.horizon_hours = horizon_hours
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path)
+        self._lock = threading.RLock()
+        self.connection = sqlite3.connect(self.path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.initialize_schema()
 
@@ -88,65 +90,66 @@ class PaperSetupJournal:
         self.close()
 
     def initialize_schema(self) -> None:
-        self.connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS paper_setups (
-                setup_key TEXT PRIMARY KEY,
-                exchange TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                timeframe TEXT NOT NULL,
-                closed_candle_at TEXT NOT NULL,
-                signal_time TEXT NOT NULL,
-                side TEXT NOT NULL,
-                futures_action TEXT NOT NULL,
-                entry REAL NOT NULL,
-                stop_loss REAL NOT NULL,
-                take_profit REAL NOT NULL,
-                reward_to_risk REAL NOT NULL,
-                close_price REAL NOT NULL,
-                technical_score REAL,
-                score_bucket TEXT NOT NULL,
-                market_regime TEXT NOT NULL,
-                volatility_regime TEXT NOT NULL,
-                trend_range_context TEXT NOT NULL,
-                quantity_btc REAL NOT NULL,
-                notional REAL NOT NULL,
-                max_loss REAL NOT NULL,
-                leverage INTEGER NOT NULL,
-                signal_json TEXT NOT NULL,
-                market_context_json TEXT,
-                probability_forecast_json TEXT,
-                setup_json TEXT NOT NULL,
-                outcome TEXT NOT NULL DEFAULT 'OPEN',
-                entry_reached INTEGER NOT NULL DEFAULT 0,
-                entry_reached_at TEXT,
-                outcome_at TEXT,
-                outcome_candle_at TEXT,
-                outcome_price REAL,
-                r_multiple REAL,
-                duration_hours REAL,
-                expires_at TEXT NOT NULL,
-                same_candle_rule TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE (
-                    exchange,
-                    symbol,
-                    timeframe,
-                    closed_candle_at,
-                    side,
-                    entry,
-                    stop_loss,
-                    take_profit
-                )
-            );
-            CREATE INDEX IF NOT EXISTS idx_paper_setups_open
-                ON paper_setups (exchange, symbol, timeframe, outcome, closed_candle_at);
-            CREATE INDEX IF NOT EXISTS idx_paper_setups_outcome
-                ON paper_setups (outcome, closed_candle_at);
-            """
-        )
-        self.connection.commit()
+        with self._lock:
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS paper_setups (
+                    setup_key TEXT PRIMARY KEY,
+                    exchange TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    closed_candle_at TEXT NOT NULL,
+                    signal_time TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    futures_action TEXT NOT NULL,
+                    entry REAL NOT NULL,
+                    stop_loss REAL NOT NULL,
+                    take_profit REAL NOT NULL,
+                    reward_to_risk REAL NOT NULL,
+                    close_price REAL NOT NULL,
+                    technical_score REAL,
+                    score_bucket TEXT NOT NULL,
+                    market_regime TEXT NOT NULL,
+                    volatility_regime TEXT NOT NULL,
+                    trend_range_context TEXT NOT NULL,
+                    quantity_btc REAL NOT NULL,
+                    notional REAL NOT NULL,
+                    max_loss REAL NOT NULL,
+                    leverage INTEGER NOT NULL,
+                    signal_json TEXT NOT NULL,
+                    market_context_json TEXT,
+                    probability_forecast_json TEXT,
+                    setup_json TEXT NOT NULL,
+                    outcome TEXT NOT NULL DEFAULT 'OPEN',
+                    entry_reached INTEGER NOT NULL DEFAULT 0,
+                    entry_reached_at TEXT,
+                    outcome_at TEXT,
+                    outcome_candle_at TEXT,
+                    outcome_price REAL,
+                    r_multiple REAL,
+                    duration_hours REAL,
+                    expires_at TEXT NOT NULL,
+                    same_candle_rule TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (
+                        exchange,
+                        symbol,
+                        timeframe,
+                        closed_candle_at,
+                        side,
+                        entry,
+                        stop_loss,
+                        take_profit
+                    )
+                );
+                CREATE INDEX IF NOT EXISTS idx_paper_setups_open
+                    ON paper_setups (exchange, symbol, timeframe, outcome, closed_candle_at);
+                CREATE INDEX IF NOT EXISTS idx_paper_setups_outcome
+                    ON paper_setups (outcome, closed_candle_at);
+                """
+            )
+            self.connection.commit()
 
     def record(
         self,
@@ -166,81 +169,82 @@ class PaperSetupJournal:
         )
         if record is None:
             return False
-        cursor = self.connection.execute(
-            """
-            INSERT OR IGNORE INTO paper_setups (
-                setup_key,
-                exchange,
-                symbol,
-                timeframe,
-                closed_candle_at,
-                signal_time,
-                side,
-                futures_action,
-                entry,
-                stop_loss,
-                take_profit,
-                reward_to_risk,
-                close_price,
-                technical_score,
-                score_bucket,
-                market_regime,
-                volatility_regime,
-                trend_range_context,
-                quantity_btc,
-                notional,
-                max_loss,
-                leverage,
-                signal_json,
-                market_context_json,
-                probability_forecast_json,
-                setup_json,
-                outcome,
-                entry_reached,
-                expires_at,
-                same_candle_rule,
-                created_at,
-                updated_at
+        with self._lock:
+            cursor = self.connection.execute(
+                """
+                INSERT OR IGNORE INTO paper_setups (
+                    setup_key,
+                    exchange,
+                    symbol,
+                    timeframe,
+                    closed_candle_at,
+                    signal_time,
+                    side,
+                    futures_action,
+                    entry,
+                    stop_loss,
+                    take_profit,
+                    reward_to_risk,
+                    close_price,
+                    technical_score,
+                    score_bucket,
+                    market_regime,
+                    volatility_regime,
+                    trend_range_context,
+                    quantity_btc,
+                    notional,
+                    max_loss,
+                    leverage,
+                    signal_json,
+                    market_context_json,
+                    probability_forecast_json,
+                    setup_json,
+                    outcome,
+                    entry_reached,
+                    expires_at,
+                    same_candle_rule,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    :setup_key,
+                    :exchange,
+                    :symbol,
+                    :timeframe,
+                    :closed_candle_at,
+                    :signal_time,
+                    :side,
+                    :futures_action,
+                    :entry,
+                    :stop_loss,
+                    :take_profit,
+                    :reward_to_risk,
+                    :close_price,
+                    :technical_score,
+                    :score_bucket,
+                    :market_regime,
+                    :volatility_regime,
+                    :trend_range_context,
+                    :quantity_btc,
+                    :notional,
+                    :max_loss,
+                    :leverage,
+                    :signal_json,
+                    :market_context_json,
+                    :probability_forecast_json,
+                    :setup_json,
+                    :outcome,
+                    :entry_reached,
+                    :expires_at,
+                    :same_candle_rule,
+                    :created_at,
+                    :updated_at
+                )
+                """,
+                record,
             )
-            VALUES (
-                :setup_key,
-                :exchange,
-                :symbol,
-                :timeframe,
-                :closed_candle_at,
-                :signal_time,
-                :side,
-                :futures_action,
-                :entry,
-                :stop_loss,
-                :take_profit,
-                :reward_to_risk,
-                :close_price,
-                :technical_score,
-                :score_bucket,
-                :market_regime,
-                :volatility_regime,
-                :trend_range_context,
-                :quantity_btc,
-                :notional,
-                :max_loss,
-                :leverage,
-                :signal_json,
-                :market_context_json,
-                :probability_forecast_json,
-                :setup_json,
-                :outcome,
-                :entry_reached,
-                :expires_at,
-                :same_candle_rule,
-                :created_at,
-                :updated_at
-            )
-            """,
-            record,
-        )
-        self.connection.commit()
-        return cursor.rowcount > 0
+            self.connection.commit()
+            return cursor.rowcount > 0
 
     def resolve_with_candles(
         self,
@@ -252,40 +256,43 @@ class PaperSetupJournal:
         limit_per_candle: int = 500,
     ) -> int:
         resolved_count = 0
-        for candle in _normalise_candles(candles):
-            rows = self._open_rows(
-                exchange,
-                symbol,
-                timeframe,
-                candle["time"],
-                limit=limit_per_candle,
-            )
-            for row in rows:
-                resolution = resolve_setup_outcome(
-                    row,
-                    candle,
-                    horizon_hours=self.horizon_hours,
+        with self._lock:
+            for candle in _normalise_candles(candles):
+                rows = self._open_rows(
+                    exchange,
+                    symbol,
+                    timeframe,
+                    candle["time"],
+                    limit=limit_per_candle,
                 )
-                if not resolution.changed:
-                    continue
-                self._apply_resolution(row["setup_key"], resolution)
-                if resolution.outcome != OUTCOME_OPEN:
-                    resolved_count += 1
-        self.connection.commit()
+                for row in rows:
+                    resolution = resolve_setup_outcome(
+                        row,
+                        candle,
+                        horizon_hours=self.horizon_hours,
+                    )
+                    if not resolution.changed:
+                        continue
+                    self._apply_resolution(row["setup_key"], resolution)
+                    if resolution.outcome != OUTCOME_OPEN:
+                        resolved_count += 1
+            self.connection.commit()
         return resolved_count
 
     def load_setups(self) -> list[dict[str, Any]]:
-        rows = self.connection.execute(
-            """
-            SELECT *
-            FROM paper_setups
-            ORDER BY closed_candle_at ASC, side ASC
-            """
-        ).fetchall()
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT *
+                FROM paper_setups
+                ORDER BY closed_candle_at ASC, side ASC
+                """
+            ).fetchall()
         return [_row_to_dict(row) for row in rows]
 
     def close(self) -> None:
-        self.connection.close()
+        with self._lock:
+            self.connection.close()
 
     def _open_rows(
         self,

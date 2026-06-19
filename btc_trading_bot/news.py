@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
 from typing import Iterable
+from urllib.parse import urlencode
 
 import requests
 from bs4 import BeautifulSoup
@@ -16,7 +17,13 @@ from urllib3.util.retry import Retry
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from btc_trading_bot.config import NewsFeed, Settings
-from btc_trading_bot.models import Headline, MacroAnalysis, SentimentAnalysis
+from btc_trading_bot.models import (
+    FuturesMetrics,
+    Headline,
+    MacroAnalysis,
+    SentimentAnalysis,
+    SentimentSource,
+)
 
 BITCOIN_PATTERN = re.compile(
     r"\b(bitcoin|btc)\b", re.IGNORECASE
@@ -38,6 +45,16 @@ NEGATIVE_RISK_PATTERN = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+FEAR_GREED_URL = "https://api.alternative.me/fng/"
+DERIVATIVES_SOURCE_NAME = "Derivatives crowding"
+NEWS_SOURCE_NAME = "Bitcoin headlines"
+FEAR_GREED_SOURCE_NAME = "Crypto Fear & Greed"
+SENTIMENT_SOURCE_WEIGHTS = {
+    NEWS_SOURCE_NAME: 0.65,
+    FEAR_GREED_SOURCE_NAME: 0.20,
+    DERIVATIVES_SOURCE_NAME: 0.15,
+}
 
 
 class NewsError(RuntimeError):
@@ -75,7 +92,7 @@ class NewsAnalyzer:
     def fetch(self) -> tuple[tuple[Headline, ...], tuple[str, ...]]:
         headlines: list[Headline] = []
         errors: list[str] = []
-        worker_count = min(6, max(1, len(self.settings.feeds)))
+        worker_count = min(7, max(1, len(self.settings.feeds) + 1))
         with ThreadPoolExecutor(
             max_workers=worker_count,
             thread_name_prefix="rss-feed",
@@ -84,6 +101,8 @@ class NewsAnalyzer:
                 executor.submit(self._fetch_feed, feed): feed
                 for feed in self.settings.feeds
             }
+            gdelt_future = executor.submit(self._fetch_gdelt_headlines)
+            futures[gdelt_future] = NewsFeed("GDELT", "", "macro")
             for future in as_completed(futures):
                 feed = futures[future]
                 try:
@@ -95,6 +114,14 @@ class NewsAnalyzer:
         if not deduplicated:
             raise NewsError("All news feeds failed or returned no recent headlines")
         return tuple(deduplicated), tuple(errors)
+
+    def fetch_sentiment_sources(
+        self,
+    ) -> tuple[tuple[SentimentSource, ...], tuple[str, ...]]:
+        try:
+            return (self._fetch_fear_greed_source(),), ()
+        except (requests.RequestException, ValueError, KeyError) as exc:
+            return (), (f"{FEAR_GREED_SOURCE_NAME}: {exc}",)
 
     def _fetch_feed(self, feed: NewsFeed) -> list[Headline]:
         session = _build_session(self.settings)
@@ -144,8 +171,63 @@ class NewsAnalyzer:
             )
         return parsed
 
+    def _fetch_gdelt_headlines(self) -> list[Headline]:
+        session = _build_session(self.settings)
+        query = (
+            "(bitcoin OR btc OR cryptocurrency OR crypto OR "
+            "\"Federal Reserve\" OR FOMC OR CPI OR inflation OR SEC OR ETF OR "
+            "regulation OR liquidation) sourcelang:english"
+        )
+        params = {
+            "query": query,
+            "mode": "artlist",
+            "format": "json",
+            "maxrecords": "40",
+            "sort": "HybridRel",
+        }
+        try:
+            response = session.get(
+                f"{GDELT_DOC_URL}?{urlencode(params)}",
+                timeout=self.settings.request_timeout_seconds,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (compatible; BTC-Tri-Factor-Bot/1.0; "
+                        "+https://github.com/)"
+                    ),
+                },
+            )
+        finally:
+            session.close()
+        response.raise_for_status()
+        return gdelt_headlines_from_payload(
+            response.json(),
+            now=datetime.now(timezone.utc),
+            max_age_hours=max(self.settings.news_max_age_hours, 48),
+        )
+
+    def _fetch_fear_greed_source(self) -> SentimentSource:
+        session = _build_session(self.settings)
+        try:
+            response = session.get(
+                FEAR_GREED_URL,
+                params={"limit": 1, "format": "json"},
+                timeout=self.settings.request_timeout_seconds,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (compatible; BTC-Tri-Factor-Bot/1.0; "
+                        "+https://github.com/)"
+                    ),
+                },
+            )
+        finally:
+            session.close()
+        response.raise_for_status()
+        return fear_greed_source_from_payload(response.json())
+
     def analyze_sentiment(
-        self, headlines: Iterable[Headline]
+        self,
+        headlines: Iterable[Headline],
+        sources: Iterable[SentimentSource] = (),
     ) -> SentimentAnalysis:
         now = datetime.now(timezone.utc)
         scored: list[Headline] = []
@@ -163,13 +245,25 @@ class NewsAnalyzer:
             total_weight += recency_weight
             scored.append(replace(headline, sentiment=score))
 
-        average = weighted_sum / total_weight if total_weight else 0.0
-        average = _clamp(average)
+        headline_average = weighted_sum / total_weight if total_weight else 0.0
+        headline_average = _clamp(headline_average)
+        source_breakdown = [
+            SentimentSource(
+                name=NEWS_SOURCE_NAME,
+                score=headline_average,
+                label=_sentiment_label(headline_average),
+                detail=f"{len(scored)} recent Bitcoin headlines",
+                updated_at=now,
+            )
+        ]
+        source_breakdown.extend(sources)
+        average = _weighted_source_score(source_breakdown)
         scored.sort(key=lambda item: item.published_at, reverse=True)
         return SentimentAnalysis(
             score=average,
             label=_sentiment_label(average),
             headlines=tuple(scored[: self.settings.headline_limit]),
+            sources=tuple(source_breakdown),
         )
 
     def analyze_macro(self, headlines: Iterable[Headline]) -> MacroAnalysis:
@@ -223,6 +317,63 @@ def neutral_sentiment() -> SentimentAnalysis:
     return SentimentAnalysis(score=0.0, label="Neutral", headlines=())
 
 
+def blend_derivatives_crowding(
+    sentiment: SentimentAnalysis,
+    metrics: FuturesMetrics | None,
+) -> SentimentAnalysis:
+    sources = tuple(
+        source
+        for source in sentiment.sources
+        if source.name != DERIVATIVES_SOURCE_NAME
+    )
+    source = derivatives_crowding_source(metrics)
+    if source is not None:
+        sources = (*sources, source)
+    if not sources:
+        return sentiment
+    score = _weighted_source_score(sources)
+    return SentimentAnalysis(
+        score=score,
+        label=_sentiment_label(score),
+        headlines=sentiment.headlines,
+        sources=sources,
+    )
+
+
+def derivatives_crowding_source(
+    metrics: FuturesMetrics | None,
+) -> SentimentSource | None:
+    if metrics is None:
+        return None
+    if metrics.crowding_score is not None:
+        score = _clamp(metrics.crowding_score)
+    else:
+        values = []
+        if metrics.funding_rate is not None:
+            values.append(_clamp(metrics.funding_rate / 0.0005))
+        for ratio in (
+            metrics.long_short_ratio,
+            metrics.top_trader_long_short_ratio,
+            metrics.top_trader_position_ratio,
+            metrics.taker_buy_sell_ratio,
+        ):
+            ratio_score = _ratio_score(ratio)
+            if ratio_score is not None:
+                values.append(ratio_score)
+        if not values:
+            return None
+        score = _clamp(sum(values) / len(values))
+    label = metrics.crowding_label or _sentiment_label(score)
+    detail = metrics.crowding_reason or _derivatives_detail(metrics)
+    return SentimentSource(
+        name=DERIVATIVES_SOURCE_NAME,
+        score=score,
+        label=label,
+        detail=detail,
+        updated_at=metrics.updated_at,
+    )
+
+
 def neutral_macro() -> MacroAnalysis:
     return MacroAnalysis(
         score=0.0,
@@ -230,6 +381,63 @@ def neutral_macro() -> MacroAnalysis:
         risk_multiplier=1.0,
         alerts=(),
     )
+
+
+def fear_greed_source_from_payload(payload: dict) -> SentimentSource:
+    rows = payload.get("data")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("response did not include Fear & Greed data")
+    latest = rows[0]
+    value = float(latest["value"])
+    score = _clamp((value - 50.0) / 50.0)
+    classification = str(latest.get("value_classification") or _sentiment_label(score))
+    timestamp = latest.get("timestamp")
+    updated_at = None
+    if timestamp is not None:
+        updated_at = datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
+    return SentimentSource(
+        name=FEAR_GREED_SOURCE_NAME,
+        score=score,
+        label=classification,
+        detail=f"Index {value:.0f}/100",
+        updated_at=updated_at,
+    )
+
+
+def gdelt_headlines_from_payload(
+    payload: dict,
+    *,
+    now: datetime,
+    max_age_hours: int,
+) -> list[Headline]:
+    articles = payload.get("articles")
+    if not isinstance(articles, list):
+        raise ValueError("response did not include GDELT articles")
+    cutoff_seconds = max_age_hours * 3600
+    headlines: list[Headline] = []
+    for article in articles:
+        if not isinstance(article, dict):
+            continue
+        title = _clean_text(str(article.get("title") or ""))
+        if not title:
+            continue
+        published = _parse_gdelt_date(article.get("seendate"), now)
+        if (now - published).total_seconds() > cutoff_seconds:
+            continue
+        domain = str(article.get("domain") or "GDELT")
+        category = "crypto" if BITCOIN_PATTERN.search(title) else "macro"
+        headlines.append(
+            Headline(
+                title=title,
+                source=f"GDELT: {domain}",
+                url=str(article.get("url") or ""),
+                published_at=published,
+                category=category,
+            )
+        )
+    if not headlines:
+        raise ValueError("GDELT returned no recent matching articles")
+    return headlines
 
 
 def _build_session(settings: Settings) -> requests.Session:
@@ -276,6 +484,18 @@ def _entry_url(entry: object) -> str:
     return str(href or link.get_text(strip=True))
 
 
+def _parse_gdelt_date(value: object, default: datetime) -> datetime:
+    if not value:
+        return default
+    text = str(value)
+    for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%d%H%M%S"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return default
+
+
 def _clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", unescape(value)).strip()
 
@@ -300,6 +520,37 @@ def _sentiment_label(score: float) -> str:
     if score <= -0.15:
         return "Bearish"
     return "Neutral"
+
+
+def _weighted_source_score(sources: Iterable[SentimentSource]) -> float:
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for source in sources:
+        weight = SENTIMENT_SOURCE_WEIGHTS.get(source.name, 0.10)
+        weighted_sum += source.score * weight
+        total_weight += weight
+    return _clamp(weighted_sum / total_weight) if total_weight else 0.0
+
+
+def _ratio_score(value: float | None) -> float | None:
+    if value is None or value <= 0:
+        return None
+    return _clamp(math.log(value) / math.log(2.0))
+
+
+def _derivatives_detail(metrics: FuturesMetrics) -> str:
+    parts: list[str] = []
+    if metrics.funding_rate is not None:
+        parts.append(f"funding {metrics.funding_rate:+.4%}")
+    if metrics.long_short_ratio is not None:
+        parts.append(f"global L/S {metrics.long_short_ratio:.2f}")
+    if metrics.top_trader_long_short_ratio is not None:
+        parts.append(f"top account L/S {metrics.top_trader_long_short_ratio:.2f}")
+    if metrics.top_trader_position_ratio is not None:
+        parts.append(f"top position L/S {metrics.top_trader_position_ratio:.2f}")
+    if metrics.taker_buy_sell_ratio is not None:
+        parts.append(f"taker buy/sell {metrics.taker_buy_sell_ratio:.2f}")
+    return ", ".join(parts) if parts else "No usable derivatives crowding inputs"
 
 
 def _clamp(value: float) -> float:

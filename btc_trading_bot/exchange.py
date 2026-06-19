@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -143,6 +144,11 @@ class ExchangeClient:
         funding: dict[str, Any] = {}
         open_interest: dict[str, Any] = {}
         ratios: list[dict[str, Any]] = []
+        top_account_ratios: list[dict[str, Any]] = []
+        top_position_ratios: list[dict[str, Any]] = []
+        taker_ratios: list[dict[str, Any]] = []
+        market_id = self._market_id()
+        ratio_params = {"symbol": market_id, "period": "5m", "limit": 1}
         requests = (
             (
                 "funding rate",
@@ -160,6 +166,27 @@ class ExchangeClient:
                     limit=1,
                 ),
             ),
+            (
+                "top trader account ratio",
+                lambda: self._implicit_futures_request(
+                    "fapiDataGetTopLongShortAccountRatio",
+                    ratio_params,
+                ),
+            ),
+            (
+                "top trader position ratio",
+                lambda: self._implicit_futures_request(
+                    "fapiDataGetTopLongShortPositionRatio",
+                    ratio_params,
+                ),
+            ),
+            (
+                "taker buy/sell ratio",
+                lambda: self._implicit_futures_request(
+                    "fapiDataGetTakerlongshortRatio",
+                    ratio_params,
+                ),
+            ),
         )
         results: list[Any] = []
         for label, operation in requests:
@@ -175,7 +202,20 @@ class ExchangeClient:
             open_interest = results[1]
         if isinstance(results[2], list):
             ratios = results[2]
-        if not funding and not open_interest and not ratios:
+        if isinstance(results[3], list):
+            top_account_ratios = results[3]
+        if isinstance(results[4], list):
+            top_position_ratios = results[4]
+        if isinstance(results[5], list):
+            taker_ratios = results[5]
+        if (
+            not funding
+            and not open_interest
+            and not ratios
+            and not top_account_ratios
+            and not top_position_ratios
+            and not taker_ratios
+        ):
             return None, tuple(errors)
 
         return (
@@ -183,6 +223,9 @@ class ExchangeClient:
                 funding,
                 open_interest,
                 ratios,
+                top_account_ratios,
+                top_position_ratios,
+                taker_ratios,
                 updated_at=datetime.now(timezone.utc),
             ),
             tuple(errors),
@@ -237,6 +280,26 @@ class ExchangeClient:
         if callable(close):
             close()
 
+    def _market_id(self) -> str:
+        try:
+            market = self.exchange.market(self.symbol)
+            market_id = market.get("id")
+            if market_id:
+                return str(market_id)
+        except Exception:
+            pass
+        return self.symbol.split(":", maxsplit=1)[0].replace("/", "")
+
+    def _implicit_futures_request(
+        self,
+        method_name: str,
+        params: dict[str, Any],
+    ) -> Any:
+        method = getattr(self.exchange, method_name, None)
+        if not callable(method):
+            raise ValueError(f"{method_name} is not available")
+        return method(params)
+
 
 def _first_number(values: dict[str, Any], *keys: str) -> float | None:
     for key in keys:
@@ -266,6 +329,9 @@ def futures_metrics_from_responses(
     funding: dict[str, Any],
     open_interest: dict[str, Any],
     ratios: list[dict[str, Any]],
+    top_account_ratios: list[dict[str, Any]] | None = None,
+    top_position_ratios: list[dict[str, Any]] | None = None,
+    taker_ratios: list[dict[str, Any]] | None = None,
     *,
     updated_at: datetime,
 ) -> FuturesMetrics:
@@ -290,16 +356,90 @@ def futures_metrics_from_responses(
         else None
     )
     latest_ratio = ratios[-1] if ratios else {}
+    latest_top_account = (top_account_ratios or [])[-1] if top_account_ratios else {}
+    latest_top_position = (top_position_ratios or [])[-1] if top_position_ratios else {}
+    latest_taker = (taker_ratios or [])[-1] if taker_ratios else {}
+    funding_rate = _number(funding.get("fundingRate"))
+    long_short_ratio = _number(latest_ratio.get("longShortRatio"))
+    top_account_ratio = _number(latest_top_account.get("longShortRatio"))
+    top_position_ratio = _number(latest_top_position.get("longShortRatio"))
+    taker_buy_sell_ratio = _number(latest_taker.get("buySellRatio"))
+    crowding_score, crowding_label, crowding_reason = _crowding_summary(
+        funding_rate=funding_rate,
+        long_short_ratio=long_short_ratio,
+        top_account_ratio=top_account_ratio,
+        top_position_ratio=top_position_ratio,
+        taker_buy_sell_ratio=taker_buy_sell_ratio,
+    )
     return FuturesMetrics(
         mark_price=mark_price,
         index_price=_number(funding.get("indexPrice")),
-        funding_rate=_number(funding.get("fundingRate")),
+        funding_rate=funding_rate,
         next_funding_at=next_funding_at,
         open_interest_amount=open_interest_amount,
         open_interest_value=open_interest_value,
-        long_short_ratio=_number(latest_ratio.get("longShortRatio")),
+        long_short_ratio=long_short_ratio,
         updated_at=updated_at,
+        top_trader_long_short_ratio=top_account_ratio,
+        top_trader_position_ratio=top_position_ratio,
+        taker_buy_sell_ratio=taker_buy_sell_ratio,
+        taker_buy_volume=_number(latest_taker.get("buyVol")),
+        taker_sell_volume=_number(latest_taker.get("sellVol")),
+        crowding_score=crowding_score,
+        crowding_label=crowding_label,
+        crowding_reason=crowding_reason,
     )
+
+
+def _crowding_summary(
+    *,
+    funding_rate: float | None,
+    long_short_ratio: float | None,
+    top_account_ratio: float | None,
+    top_position_ratio: float | None,
+    taker_buy_sell_ratio: float | None,
+) -> tuple[float | None, str | None, str | None]:
+    values: list[float] = []
+    parts: list[str] = []
+    if funding_rate is not None:
+        values.append(_clamp(funding_rate / 0.0005))
+        parts.append(f"funding {funding_rate:+.4%}")
+    for label, ratio in (
+        ("global L/S", long_short_ratio),
+        ("top account L/S", top_account_ratio),
+        ("top position L/S", top_position_ratio),
+        ("taker buy/sell", taker_buy_sell_ratio),
+    ):
+        score = _ratio_score(ratio)
+        if score is not None:
+            values.append(score)
+            parts.append(f"{label} {ratio:.2f}")
+    if not values:
+        return None, None, None
+    score = _clamp(sum(values) / len(values))
+    return score, _crowding_label(score), ", ".join(parts)
+
+
+def _ratio_score(value: float | None) -> float | None:
+    if value is None or value <= 0:
+        return None
+    return _clamp(math.log(value) / math.log(2.0))
+
+
+def _crowding_label(score: float) -> str:
+    if score >= 0.55:
+        return "Crowded Long"
+    if score >= 0.20:
+        return "Long-Leaning"
+    if score <= -0.55:
+        return "Crowded Short"
+    if score <= -0.20:
+        return "Short-Leaning"
+    return "Balanced"
+
+
+def _clamp(value: float) -> float:
+    return max(-1.0, min(1.0, value))
 
 
 def market_snapshot_from_ticker(

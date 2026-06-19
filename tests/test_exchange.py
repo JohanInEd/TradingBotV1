@@ -183,6 +183,9 @@ def test_futures_metrics_normalize_public_binance_responses() -> None:
             "openInterestValue": None,
         },
         [{"longShortRatio": 1.65}],
+        [{"longShortRatio": 1.80}],
+        [{"longShortRatio": 2.10}],
+        [{"buySellRatio": 1.25, "buyVol": 12_000.0, "sellVol": 9_600.0}],
         updated_at=updated_at,
     )
 
@@ -191,6 +194,12 @@ def test_futures_metrics_normalize_public_binance_responses() -> None:
     assert metrics.funding_rate == 0.0001
     assert metrics.open_interest_value == 6_350_000_000.0
     assert metrics.long_short_ratio == 1.65
+    assert metrics.top_trader_long_short_ratio == 1.80
+    assert metrics.top_trader_position_ratio == 2.10
+    assert metrics.taker_buy_sell_ratio == 1.25
+    assert metrics.taker_buy_volume == 12_000.0
+    assert metrics.crowding_score is not None
+    assert metrics.crowding_label in {"Long-Leaning", "Crowded Long"}
     assert metrics.next_funding_at == datetime(
         2026, 6, 11, 16, 0, tzinfo=timezone.utc
     )
@@ -217,6 +226,24 @@ class _FakeDerivativesExchange:
     ) -> list[dict[str, float]]:
         return [{"longShortRatio": 1.2}]
 
+    def market(self, symbol: str) -> dict[str, str]:
+        return {"id": "BTCUSDT"}
+
+    def fapiDataGetTopLongShortAccountRatio(
+        self, params: dict[str, object]
+    ) -> list[dict[str, float]]:
+        return [{"longShortRatio": 1.4}]
+
+    def fapiDataGetTopLongShortPositionRatio(
+        self, params: dict[str, object]
+    ) -> list[dict[str, float]]:
+        return [{"longShortRatio": 1.5}]
+
+    def fapiDataGetTakerlongshortRatio(
+        self, params: dict[str, object]
+    ) -> list[dict[str, float]]:
+        return [{"buySellRatio": 1.1, "buyVol": 1000.0, "sellVol": 900.0}]
+
 
 def test_fetch_futures_metrics_uses_unified_ccxt_methods() -> None:
     client = ExchangeClient.__new__(ExchangeClient)
@@ -231,3 +258,6 @@ def test_fetch_futures_metrics_uses_unified_ccxt_methods() -> None:
     assert metrics.mark_price == 100.0
     assert metrics.open_interest_amount == 25.0
     assert metrics.long_short_ratio == 1.2
+    assert metrics.top_trader_long_short_ratio == 1.4
+    assert metrics.top_trader_position_ratio == 1.5
+    assert metrics.taker_buy_sell_ratio == 1.1

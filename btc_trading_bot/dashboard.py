@@ -218,6 +218,15 @@ def _sentiment_panel(evaluation: Evaluation) -> Panel:
     heading.append(f"Average: {sentiment.score:+.3f}  ", style="bold")
     heading.append(sentiment.label, style=_score_style(sentiment.score))
     items: list[RenderableType] = [heading, Text("")]
+    if sentiment.sources:
+        for source in sentiment.sources:
+            line = Text("- ")
+            line.append(source.name, style="bold")
+            line.append(f": {source.score:+.3f} ")
+            line.append(source.label, style=_score_style(source.score))
+            line.append(f"  {source.detail}", style="dim")
+            items.append(line)
+        items.append(Text(""))
     if sentiment.headlines:
         items.extend(_headline_line(item, include_score=True) for item in sentiment.headlines)
     else:
@@ -608,6 +617,15 @@ def _futures_metrics_line(evaluation: Evaluation) -> Text:
         line.append(f" ({_compact_usd(metrics.open_interest_value)})", style="dim")
     if metrics.long_short_ratio is not None:
         line.append(f"  L/S {metrics.long_short_ratio:.2f}")
+    if metrics.top_trader_long_short_ratio is not None:
+        line.append(f"  Top acct {metrics.top_trader_long_short_ratio:.2f}")
+    if metrics.taker_buy_sell_ratio is not None:
+        line.append(f"  Taker {metrics.taker_buy_sell_ratio:.2f}")
+    if metrics.crowding_label is not None and metrics.crowding_score is not None:
+        line.append(
+            f"  {metrics.crowding_label} {metrics.crowding_score:+.2f}",
+            style=_score_style(metrics.crowding_score),
+        )
     return line
 
 

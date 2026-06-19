@@ -126,7 +126,7 @@ function App() {
               <MetricCard
                 label="News Sentiment"
                 value={sentiment.label}
-                detail={`Weighted ${formatNumber(sentiment.score, 3)} - ${evaluation.news_health.status}`}
+                detail={`Weighted ${formatNumber(sentiment.score, 3)} - ${(sentiment.sources ?? []).length} sources - ${evaluation.news_health.status}`}
                 tone={sentiment.score > 0.15 ? "positive" : sentiment.score < -0.15 ? "negative" : "neutral"}
               />
               <MetricCard
@@ -165,7 +165,7 @@ function App() {
 
             <section className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
               <SignalPanel evaluation={evaluation} futures={futures} paperSetup={paperSetup} futuresMetrics={futuresMetrics} probability={probability} priceRange={priceRange} shakeout={shakeout} tradeFilter={tradeFilter} />
-              <NewsPanel headlines={allHeadlines} />
+              <NewsPanel headlines={allHeadlines} sources={sentiment?.sources ?? []} />
             </section>
 
             <PaperJournalPanel report={paperJournal} />
@@ -660,6 +660,10 @@ function SignalPanel({ evaluation, futures, paperSetup, futuresMetrics, probabil
           <MiniLine label="Index" value={formatUsd(futuresMetrics?.index_price)} />
           <MiniLine label="Funding" value={formatPct((futuresMetrics?.funding_rate ?? 0) * 100, 4)} />
           <MiniLine label="Long/short" value={formatNumber(futuresMetrics?.long_short_ratio, 2)} />
+          <MiniLine label="Top acct L/S" value={formatNumber(futuresMetrics?.top_trader_long_short_ratio, 2)} />
+          <MiniLine label="Top pos L/S" value={formatNumber(futuresMetrics?.top_trader_position_ratio, 2)} />
+          <MiniLine label="Taker B/S" value={formatNumber(futuresMetrics?.taker_buy_sell_ratio, 2)} />
+          <MiniLine label="Crowding" value={futuresMetrics?.crowding_label ? `${futuresMetrics.crowding_label} ${formatSignedNumber(futuresMetrics.crowding_score, 2)}` : "-"} />
         </div>
       </div>
 
@@ -894,11 +898,27 @@ function JournalGroup({ title, rows }) {
   );
 }
 
-function NewsPanel({ headlines }) {
+function NewsPanel({ headlines, sources }) {
   return (
     <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
-      <h2 className="text-xl font-semibold">Real-Time News</h2>
-      <p className="text-sm text-slate-400">Latest crypto headlines and macro alerts used by the model.</p>
+      <h2 className="text-xl font-semibold">Market Mood</h2>
+      <p className="text-sm text-slate-400">News, Fear & Greed, GDELT, and derivatives crowding used by the model.</p>
+      <div className="mt-5 grid gap-3 md:grid-cols-3">
+        {sources.length ? sources.map((source) => (
+          <div key={source.name} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-medium text-slate-200">{source.name}</p>
+              <span className={`text-sm font-semibold ${source.score > 0.15 ? "text-emerald-300" : source.score < -0.15 ? "text-rose-300" : "text-cyan-200"}`}>
+                {formatSignedNumber(source.score, 3)}
+              </span>
+            </div>
+            <p className="mt-2 text-lg font-semibold text-slate-100">{source.label}</p>
+            <p className="mt-2 text-xs text-slate-400">{source.detail}</p>
+          </div>
+        )) : (
+          <p className="rounded-2xl bg-black/20 p-4 text-sm text-slate-400 md:col-span-3">Waiting for market mood sources.</p>
+        )}
+      </div>
       <div className="mt-5 space-y-3">
         {headlines.length ? (
           headlines.map((headline) => (

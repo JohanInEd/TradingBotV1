@@ -108,6 +108,10 @@ def build_journal_record(
             "score": _finite_or_none(evaluation.sentiment.score),
             "label": evaluation.sentiment.label,
             "headline_count": len(evaluation.sentiment.headlines),
+            "sources": [
+                _sentiment_source_payload(item)
+                for item in evaluation.sentiment.sources
+            ],
             "headlines": [
                 _headline_payload(item) for item in evaluation.sentiment.headlines
             ],
@@ -558,6 +562,16 @@ def _headline_payload(headline: Headline) -> dict[str, Any]:
         "published_at": _iso(headline.published_at),
         "category": headline.category,
         "sentiment": _finite_or_none(headline.sentiment),
+    }
+
+
+def _sentiment_source_payload(source: Any) -> dict[str, Any]:
+    return {
+        "name": getattr(source, "name", ""),
+        "score": _finite_or_none(getattr(source, "score", None)),
+        "label": getattr(source, "label", ""),
+        "detail": getattr(source, "detail", ""),
+        "updated_at": _iso(getattr(source, "updated_at", None)),
     }
 
 

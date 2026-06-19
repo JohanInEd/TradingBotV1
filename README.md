@@ -19,9 +19,11 @@ uses the public perpetual-contract quote as its reference.
   daily trend, and 1-hour entry timing to agree. Otherwise the result is held
   at `HOLD / NEUTRAL`.
 - Bitcoin news sentiment, 30%: recency-weighted VADER sentiment from recent
-  CoinDesk, Cointelegraph, and Decrypt RSS headlines.
+  CoinDesk, Cointelegraph, Decrypt RSS headlines, GDELT market headlines, the
+  Crypto Fear & Greed Index, and Binance USD-M derivatives crowding when
+  available.
 - Macro factor, 30%: Federal Reserve, FOMC, rates, CPI, inflation, central-bank,
-  regulation, and liquidation headlines.
+  regulation, and liquidation headlines from RSS and GDELT.
 - A detected negative macro event reduces any positive confluence score with a
   defensive multiplier. It does not suppress bearish signals.
 - Score above `+0.65`: `STRONG BUY`; below `-0.65`: `STRONG SELL`; otherwise:
@@ -46,9 +48,11 @@ change the established signal weights.
 
 In Binance USD-M mode, the dashboard also displays public derivatives context:
 mark and index price, perpetual basis, funding rate and countdown, open
-interest, and the global long/short account ratio. These metrics are currently
-confirmation context and do not alter the established 40/30/30 signal weights.
-It also listens to public order-book depth, aggregate trades, and liquidation
+interest, the global long/short account ratio, top-trader account and position
+ratios, taker buy/sell ratio, and a derivatives crowding score. These metrics
+are confirmation context and also contribute a small source-level input inside
+the existing 30% sentiment bucket when available; they do not add a new fourth
+signal weight. It also listens to public order-book depth, aggregate trades, and liquidation
 events to estimate live shakeout-risk context. Depth, taker flow, large trades,
 and liquidation stress are compared with recent rolling baselines and fade with
 freshness decay instead of dropping out abruptly at the window edge. This is an
@@ -376,9 +380,10 @@ The dashboard receives live ticker and provisional `4h`, `1d`, and `1h` candle
 updates through WebSockets. Provisional calculations are informational and do
 not replace the closed-candle signal. If the ticker stream becomes stale, the
 existing REST client resumes polling. RSS news refreshes in a dedicated worker,
-with publishers fetched concurrently so one slow feed cannot delay every other
-source. A completed refresh immediately recalculates the signal while preserving
-the last valid news analysis during a temporary feed outage.
+with publishers and GDELT fetched concurrently so one slow feed cannot delay
+every other source. A completed refresh also pulls the Crypto Fear & Greed Index
+and immediately recalculates the signal while preserving the last valid news
+analysis during a temporary feed outage.
 
 The web snapshot also exposes compact chart data from the current 4-hour candle
 set. Each row includes OHLCV plus EMA 20/50, VWAP, Bollinger bands, RSI 14,

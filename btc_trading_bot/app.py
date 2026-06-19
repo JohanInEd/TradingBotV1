@@ -41,6 +41,7 @@ from btc_trading_bot.microstructure import ShakeoutEventRecorder, ShakeoutMonito
 from btc_trading_bot.news import (
     NewsAnalyzer,
     NewsError,
+    blend_derivatives_crowding,
     neutral_macro,
     neutral_sentiment,
 )
@@ -109,6 +110,7 @@ class BotService:
         shakeout = self.apply_futures_metrics(
             futures_metrics, datetime.now(timezone.utc)
         )
+        sentiment = blend_derivatives_crowding(sentiment, futures_metrics)
         evaluated_at = datetime.now(timezone.utc)
         signal = calculate_signal(technical, sentiment, macro, self.settings)
         futures, trade_filter = self.build_futures_plan(
@@ -331,9 +333,10 @@ class BotService:
     ]:
         try:
             headlines, feed_errors = self.news.fetch()
-            sentiment = self.news.analyze_sentiment(headlines)
+            sources, source_errors = self.news.fetch_sentiment_sources()
+            sentiment = self.news.analyze_sentiment(headlines, sources=sources)
             macro = self.news.analyze_macro(headlines)
-            return sentiment, macro, feed_errors
+            return sentiment, macro, (*feed_errors, *source_errors)
         except NewsError as exc:
             return None, None, (str(exc),)
 
@@ -721,6 +724,7 @@ def run(settings: Settings, once: bool = False) -> int:
                                 attempted_at=now,
                             ),
                         )
+                        evaluation = _apply_sentiment_context(evaluation, settings)
                         evaluation = _apply_current_trade_filters(evaluation, service)
                     except Exception as exc:
                         evaluation = _with_error(
@@ -895,6 +899,20 @@ def _apply_current_trade_filters(
     )
 
 
+def _apply_sentiment_context(
+    evaluation: Evaluation,
+    settings: Settings,
+) -> Evaluation:
+    sentiment = blend_derivatives_crowding(
+        evaluation.sentiment,
+        evaluation.futures_metrics,
+    )
+    if sentiment == evaluation.sentiment:
+        return evaluation
+    signal = calculate_signal(evaluation.technical, sentiment, evaluation.macro, settings)
+    return replace(evaluation, sentiment=sentiment, signal=signal)
+
+
 def _apply_news_refresh(
     evaluation: Evaluation,
     sentiment: SentimentAnalysis | None,
@@ -917,6 +935,7 @@ def _apply_news_refresh(
             ),
         )
 
+    sentiment = blend_derivatives_crowding(sentiment, current.futures_metrics)
     signal = calculate_signal(current.technical, sentiment, macro, settings)
     futures, trade_filter = apply_do_not_trade_filters(
         build_futures_recommendation(signal, current.market, settings),

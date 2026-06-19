@@ -20,6 +20,7 @@ from btc_trading_bot.app import (
     BotService,
     _apply_current_trade_filters,
     _apply_news_refresh,
+    _apply_sentiment_context,
     _apply_stream_events,
     _completed_health,
     _market_is_stale,
@@ -338,6 +339,7 @@ class WebStateService:
                         attempted_at=now,
                     ),
                 )
+                evaluation = _apply_sentiment_context(evaluation, self.settings)
                 evaluation = _apply_current_trade_filters(evaluation, self.service)
             except Exception as exc:
                 evaluation = _with_error(

@@ -26,6 +26,14 @@ class FuturesMetrics:
     open_interest_value: float | None
     long_short_ratio: float | None
     updated_at: datetime
+    top_trader_long_short_ratio: float | None = None
+    top_trader_position_ratio: float | None = None
+    taker_buy_sell_ratio: float | None = None
+    taker_buy_volume: float | None = None
+    taker_sell_volume: float | None = None
+    crowding_score: float | None = None
+    crowding_label: str | None = None
+    crowding_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,10 +86,20 @@ class Headline:
 
 
 @dataclass(frozen=True, slots=True)
+class SentimentSource:
+    name: str
+    score: float
+    label: str
+    detail: str
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SentimentAnalysis:
     score: float
     label: str
     headlines: tuple[Headline, ...] = ()
+    sources: tuple[SentimentSource, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -816,6 +816,16 @@ def _futures_metrics_from_payload(payload: Any) -> FuturesMetrics | None:
         open_interest_value=_number(payload.get("open_interest_value")),
         long_short_ratio=_number(payload.get("long_short_ratio")),
         updated_at=updated_at,
+        top_trader_long_short_ratio=_number(
+            payload.get("top_trader_long_short_ratio")
+        ),
+        top_trader_position_ratio=_number(payload.get("top_trader_position_ratio")),
+        taker_buy_sell_ratio=_number(payload.get("taker_buy_sell_ratio")),
+        taker_buy_volume=_number(payload.get("taker_buy_volume")),
+        taker_sell_volume=_number(payload.get("taker_sell_volume")),
+        crowding_score=_number(payload.get("crowding_score")),
+        crowding_label=payload.get("crowding_label"),
+        crowding_reason=payload.get("crowding_reason"),
     )
 
 

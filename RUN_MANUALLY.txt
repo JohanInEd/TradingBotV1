@@ -1,0 +1,96 @@
+BTC Tri-Factor Terminal Bot - Manual Run Guide
+==============================================
+
+Requirements
+------------
+- Windows
+- Python 3.10 or newer
+- Node.js and npm only if you want to run the React web dashboard
+
+
+First-time Python setup
+-----------------------
+Open PowerShell in the project folder:
+
+  cd D:\TradiPlatform
+  python -m venv .venv
+  .\.venv\Scripts\Activate.ps1
+  python -m pip install -e ".[dev]"
+
+
+Run the terminal dashboard manually
+-----------------------------------
+PowerShell:
+
+  cd D:\TradiPlatform
+  .\.venv\Scripts\Activate.ps1
+  $env:PYTHONUTF8 = "1"
+  $env:BOT_EXCHANGE = "binance-usdm"
+  btc-tri-factor
+
+Windows CMD:
+
+  cd /d D:\TradiPlatform
+  chcp 65001 >nul
+  set "PYTHONUTF8=1"
+  set "BOT_EXCHANGE=binance-usdm"
+  .venv\Scripts\python.exe -m btc_trading_bot
+
+
+Run one evaluation without the live screen
+------------------------------------------
+PowerShell:
+
+  cd D:\TradiPlatform
+  .\.venv\Scripts\Activate.ps1
+  btc-tri-factor --once
+
+
+Run the web dashboard manually
+------------------------------
+Open terminal 1 for the Python API:
+
+  cd D:\TradiPlatform
+  .\.venv\Scripts\Activate.ps1
+  $env:BOT_EXCHANGE = "binance-usdm"
+  btc-tri-factor-web
+
+Open terminal 2 for the React dashboard:
+
+  cd D:\TradiPlatform\web
+  npm install
+  npm run dev
+
+Then open this URL in your browser:
+
+  http://127.0.0.1:5173
+
+
+Production-style local web build
+--------------------------------
+PowerShell:
+
+  cd D:\TradiPlatform\web
+  npm install
+  npm run build
+  cd ..
+  .\.venv\Scripts\Activate.ps1
+  $env:BOT_EXCHANGE = "binance-usdm"
+  btc-tri-factor-web
+
+After the build exists, the Python web service serves the dashboard at:
+
+  http://127.0.0.1:8765
+
+
+Quick launcher
+--------------
+You can also double-click run_project.bat from the project folder. It starts
+both parts of the web dashboard:
+
+  Backend API: http://127.0.0.1:8765
+  React dashboard: http://127.0.0.1:5173
+
+The launcher opens two command windows. Keep both windows running while using
+the dashboard. If web\node_modules does not exist yet, the dashboard window runs
+npm install before npm run dev.

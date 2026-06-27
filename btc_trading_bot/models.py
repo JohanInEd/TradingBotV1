@@ -83,6 +83,39 @@ class Headline:
     published_at: datetime
     category: str
     sentiment: float = 0.0
+    event_type: str = "general"
+    event_impact: str = "LOW"
+    event_direction: str = "NEUTRAL"
+    event_confidence: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class NewsEventSummary:
+    event_type: str
+    count: int
+    average_sentiment: float
+    impact: str
+    direction: str
+    latest_at: datetime | None = None
+    representative_title: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EconomicCalendarEvent:
+    name: str
+    event_type: str
+    scheduled_at: datetime
+    impact: str
+    source: str = "built-in"
+
+
+@dataclass(frozen=True, slots=True)
+class EconomicCalendarRisk:
+    status: str
+    risk_multiplier: float
+    active_events: tuple[EconomicCalendarEvent, ...] = ()
+    upcoming_events: tuple[EconomicCalendarEvent, ...] = ()
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +133,7 @@ class SentimentAnalysis:
     label: str
     headlines: tuple[Headline, ...] = ()
     sources: tuple[SentimentSource, ...] = ()
+    events: tuple[NewsEventSummary, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +142,8 @@ class MacroAnalysis:
     status: str
     risk_multiplier: float
     alerts: tuple[Headline, ...] = ()
+    events: tuple[NewsEventSummary, ...] = ()
+    calendar: EconomicCalendarRisk | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +206,34 @@ class PaperSetup:
     probability_method: str | None = None
     outcome: str = "OPEN"
     disclaimer: str = "paper setup only; no order placed; not financial advice"
+
+
+@dataclass(frozen=True, slots=True)
+class ScannerCandidate:
+    symbol: str
+    action: str
+    side: str
+    confidence: float
+    price: float | None
+    change_24h: float | None
+    signal: str
+    score: float
+    raw_score: float
+    technical_score: float
+    sentiment_score: float
+    macro_score: float
+    market_regime: str | None
+    volatility_regime: str | None
+    reason: str
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MarketScannerResult:
+    symbols: tuple[str, ...]
+    candidates: tuple[ScannerCandidate, ...]
+    generated_at: datetime
+    errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,3 +369,4 @@ class Evaluation:
     market_health: RefreshHealth = field(default_factory=RefreshHealth)
     futures_health: RefreshHealth = field(default_factory=RefreshHealth)
     news_health: RefreshHealth = field(default_factory=RefreshHealth)
+    scanner: MarketScannerResult | None = None

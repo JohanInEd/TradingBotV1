@@ -47,6 +47,7 @@ def build_static_report(evaluation: Evaluation) -> Group:
         _sentiment_panel(evaluation),
         _macro_panel(evaluation),
         _shakeout_panel(evaluation),
+        _scanner_panel(evaluation),
         _score_panel(evaluation),
         _signal_panel(evaluation),
     )
@@ -227,6 +228,21 @@ def _sentiment_panel(evaluation: Evaluation) -> Panel:
             line.append(f"  {source.detail}", style="dim")
             items.append(line)
         items.append(Text(""))
+    if sentiment.events:
+        items.append(Text("Event buckets", style="bold cyan"))
+        for event in sentiment.events[:5]:
+            line = Text("- ")
+            line.append(event.event_type, style="bold")
+            line.append(f": {event.count} ")
+            line.append(event.direction, style=_score_style(event.average_sentiment))
+            line.append(
+                f" {event.average_sentiment:+.2f}",
+                style=_score_style(event.average_sentiment),
+            )
+            if event.representative_title:
+                line.append(f"  {event.representative_title}", style="dim")
+            items.append(line)
+        items.append(Text(""))
     if sentiment.headlines:
         items.extend(_headline_line(item, include_score=True) for item in sentiment.headlines)
     else:
@@ -257,6 +273,37 @@ def _macro_panel(evaluation: Evaluation) -> Panel:
     if macro.risk_multiplier < 1:
         heading.append(f"  Defensive multiplier {macro.risk_multiplier:.2f}x", style="red")
     items: list[RenderableType] = [heading, Text("")]
+    if macro.calendar is not None:
+        calendar = macro.calendar
+        items.append(
+            Text(
+                f"Calendar: {calendar.status}  {calendar.reason}",
+                style="bold cyan",
+            )
+        )
+        for event in (*calendar.active_events, *calendar.upcoming_events[:3]):
+            line = Text("- ")
+            line.append(event.name, style="bold")
+            line.append(
+                f"  {event.scheduled_at.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+                style="dim",
+            )
+            line.append(f"  {event.impact}")
+            items.append(line)
+        items.append(Text(""))
+    if macro.events:
+        items.append(Text("Macro event buckets", style="bold cyan"))
+        for event in macro.events[:4]:
+            line = Text("- ")
+            line.append(event.event_type, style="bold")
+            line.append(f": {event.count} ")
+            line.append(event.direction, style=_score_style(event.average_sentiment))
+            line.append(
+                f" {event.average_sentiment:+.2f}",
+                style=_score_style(event.average_sentiment),
+            )
+            items.append(line)
+        items.append(Text(""))
     if macro.alerts:
         items.extend(_headline_line(item, include_score=True) for item in macro.alerts)
     else:
@@ -472,6 +519,23 @@ def _signal_panel(evaluation: Evaluation) -> Panel:
             style="dim",
         )
         content.append(range_line)
+    if evaluation.scanner is not None and evaluation.scanner.candidates:
+        top = [
+            candidate
+            for candidate in evaluation.scanner.candidates
+            if candidate.action in {"GO LONG", "GO SHORT"}
+        ][:3]
+        if top:
+            scanner_line = Text(justify="center")
+            scanner_line.append("Scanner: ", style="bold cyan")
+            scanner_line.append(
+                " | ".join(
+                    f"{item.symbol} {item.action} {item.confidence:.2f}"
+                    for item in top
+                ),
+                style="bold",
+            )
+            content.append(scanner_line)
     if evaluation.errors:
         content.append(
             Text(
@@ -487,6 +551,53 @@ def _signal_panel(evaluation: Evaluation) -> Panel:
         border_style=_score_style(signal.score),
         box=box.DOUBLE,
     )
+
+
+def _scanner_panel(evaluation: Evaluation) -> Panel:
+    scanner = evaluation.scanner
+    if scanner is None:
+        return Panel(
+            Text("Set BOT_SYMBOLS to scan a comma-separated futures universe.", style="dim"),
+            title="[bold]Long / Short Scanner[/bold]",
+            border_style="white",
+            box=box.ROUNDED,
+        )
+
+    table = Table(box=None, expand=True, show_header=True)
+    table.add_column("Symbol", style="bold")
+    table.add_column("Action")
+    table.add_column("Conf", justify="right")
+    table.add_column("Price", justify="right")
+    table.add_column("24h", justify="right")
+    table.add_column("Score", justify="right")
+    table.add_column("Context")
+    for candidate in scanner.candidates[:12]:
+        action_style = (
+            "green"
+            if candidate.action == "GO LONG"
+            else "red"
+            if candidate.action == "GO SHORT"
+            else "yellow"
+            if candidate.action == "STAY FLAT"
+            else "dim"
+        )
+        price = "-" if candidate.price is None else f"{candidate.price:,.4f}"
+        change = "-" if candidate.change_24h is None else f"{candidate.change_24h:+.2f}%"
+        context = candidate.error or candidate.reason
+        table.add_row(
+            candidate.symbol,
+            Text(candidate.action, style=action_style),
+            f"{candidate.confidence:.2f}",
+            price,
+            change,
+            f"{candidate.score:+.3f}",
+            context,
+        )
+    title = (
+        f"[bold]Long / Short Scanner[/bold] "
+        f"[dim]({len(scanner.candidates)}/{len(scanner.symbols)} symbols)[/dim]"
+    )
+    return Panel(table, title=title, border_style="bright_blue", box=box.ROUNDED)
 
 
 def _shakeout_signal_context(evaluation: Evaluation) -> str:

@@ -29,6 +29,7 @@ btc-shakeout-backtest = "btc_trading_bot.shakeout_backtest:main"
 btc-signal-journal = "btc_trading_bot.signal_journal:main"
 btc-paper-setups = "btc_trading_bot.paper_setups:main"
 btc-history-sync = "btc_trading_bot.history:main"
+btc-futures-sim = "btc_trading_bot.futures_simulator:main"
 
 [tool.setuptools.packages.find]
 include = ["btc_trading_bot*"]

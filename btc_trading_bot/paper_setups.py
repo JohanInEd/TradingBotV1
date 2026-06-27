@@ -67,10 +67,45 @@ class PaperSetupStats:
 
 
 @dataclass(frozen=True, slots=True)
+class PaperLedgerTrade:
+    side: str
+    outcome: str
+    entry_time: datetime | None
+    exit_time: datetime | None
+    entry_price: float
+    exit_price: float | None
+    quantity_btc: float
+    notional: float
+    gross_pnl: float
+    fees: float
+    slippage: float
+    funding: float
+    net_pnl: float
+    gross_r: float
+    net_r: float
+
+
+@dataclass(frozen=True, slots=True)
+class PaperLedgerStats:
+    starting_equity: float
+    closed_trades: int
+    gross_pnl: float
+    net_pnl: float
+    fees: float
+    slippage: float
+    funding: float
+    return_percent: float
+    max_drawdown_percent: float
+    average_net_r: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class PaperSetupReport:
     total_setups: int
     overall: PaperSetupStats
     groups: dict[str, dict[str, PaperSetupStats]]
+    ledger: PaperLedgerStats | None = None
+    recent_trades: tuple[PaperLedgerTrade, ...] = ()
 
 
 class PaperSetupJournal:
@@ -595,10 +630,16 @@ def resolve_setup_outcome(
 
 def analyze_paper_setups(path: Path) -> PaperSetupReport:
     with PaperSetupJournal(path) as journal:
-        return analyze_setup_rows(journal.load_setups())
+        return analyze_setup_rows(journal.load_setups(), settings=Settings())
 
 
-def analyze_setup_rows(rows: list[dict[str, Any]]) -> PaperSetupReport:
+def analyze_setup_rows(
+    rows: list[dict[str, Any]],
+    *,
+    settings: Settings | None = None,
+) -> PaperSetupReport:
+    settings = settings or Settings()
+    ledger_trades = build_paper_ledger_trades(rows, settings=settings)
     groups: dict[str, dict[str, PaperSetupStats]] = {}
     for group_name in ANALYSIS_GROUPS:
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -611,7 +652,65 @@ def analyze_setup_rows(rows: list[dict[str, Any]]) -> PaperSetupReport:
         total_setups=len(rows),
         overall=_stats(rows),
         groups=groups,
+        ledger=_ledger_stats(ledger_trades, settings=settings),
+        recent_trades=tuple(ledger_trades[-12:]),
     )
+
+
+def build_paper_ledger_trades(
+    rows: list[dict[str, Any]],
+    *,
+    settings: Settings,
+) -> list[PaperLedgerTrade]:
+    trades: list[PaperLedgerTrade] = []
+    for row in sorted(rows, key=lambda item: str(item.get("outcome_at") or "")):
+        if row.get("outcome") == OUTCOME_OPEN:
+            continue
+        entry = _finite_or_none(row.get("entry"))
+        quantity = _finite_or_none(row.get("quantity_btc")) or 0.0
+        notional = _finite_or_none(row.get("notional")) or 0.0
+        max_loss = _finite_or_none(row.get("max_loss")) or 0.0
+        r_multiple = _finite_or_none(row.get("r_multiple"))
+        if entry is None or r_multiple is None:
+            continue
+        exit_price = _finite_or_none(row.get("outcome_price"))
+        exit_notional = quantity * exit_price if exit_price is not None else notional
+        gross_pnl = r_multiple * max_loss
+        fees = (notional + abs(exit_notional)) * settings.paper_ledger_fee_rate
+        slippage = (
+            (notional + abs(exit_notional))
+            * settings.paper_ledger_slippage_bps
+            / 10_000.0
+        )
+        duration_hours = max(0.0, _finite_or_none(row.get("duration_hours")) or 0.0)
+        funding = (
+            notional
+            * settings.paper_ledger_funding_rate_8h
+            * (duration_hours / 8.0)
+            * (1.0 if row.get("side") == "LONG" else -1.0)
+        )
+        net_pnl = gross_pnl - fees - slippage - funding
+        trades.append(
+            PaperLedgerTrade(
+                side=str(row.get("side") or "UNKNOWN"),
+                outcome=str(row.get("outcome") or "UNKNOWN"),
+                entry_time=_parse_datetime_or_none(row.get("signal_time")),
+                exit_time=_parse_datetime_or_none(row.get("outcome_candle_at"))
+                or _parse_datetime_or_none(row.get("outcome_at")),
+                entry_price=entry,
+                exit_price=exit_price,
+                quantity_btc=quantity,
+                notional=notional,
+                gross_pnl=gross_pnl,
+                fees=fees,
+                slippage=slippage,
+                funding=funding,
+                net_pnl=net_pnl,
+                gross_r=r_multiple,
+                net_r=(net_pnl / max_loss) if max_loss else 0.0,
+            )
+        )
+    return trades
 
 
 def format_paper_setup_report(report: PaperSetupReport) -> str:
@@ -620,6 +719,20 @@ def format_paper_setup_report(report: PaperSetupReport) -> str:
         _stats_line("Overall", report.overall),
         f"Same-candle rule: {SAME_CANDLE_RULE}",
     ]
+    if report.ledger is not None:
+        ledger = report.ledger
+        lines.append(
+            "Ledger: "
+            f"closed={ledger.closed_trades} "
+            f"gross={_usd(ledger.gross_pnl)} "
+            f"net={_usd(ledger.net_pnl)} "
+            f"fees={_usd(ledger.fees)} "
+            f"slippage={_usd(ledger.slippage)} "
+            f"funding={_usd(ledger.funding)} "
+            f"return={_pct_value(ledger.return_percent)} "
+            f"maxDD={_pct_value(ledger.max_drawdown_percent)} "
+            f"avgNetR={_signed(ledger.average_net_r)}"
+        )
     for group_name in ANALYSIS_GROUPS:
         group = report.groups.get(group_name, {})
         if not group:
@@ -796,6 +909,41 @@ def _stats(rows: list[dict[str, Any]]) -> PaperSetupStats:
     )
 
 
+def _ledger_stats(
+    trades: list[PaperLedgerTrade],
+    *,
+    settings: Settings,
+) -> PaperLedgerStats:
+    equity = settings.paper_account_equity
+    peak = equity
+    max_drawdown = 0.0
+    for trade in trades:
+        equity += trade.net_pnl
+        peak = max(peak, equity)
+        if peak > 0:
+            max_drawdown = max(max_drawdown, (peak - equity) / peak * 100.0)
+    net_r_values = [trade.net_r for trade in trades]
+    net_pnl = sum(trade.net_pnl for trade in trades)
+    return PaperLedgerStats(
+        starting_equity=settings.paper_account_equity,
+        closed_trades=len(trades),
+        gross_pnl=sum(trade.gross_pnl for trade in trades),
+        net_pnl=net_pnl,
+        fees=sum(trade.fees for trade in trades),
+        slippage=sum(trade.slippage for trade in trades),
+        funding=sum(trade.funding for trade in trades),
+        return_percent=(
+            net_pnl / settings.paper_account_equity * 100.0
+            if settings.paper_account_equity
+            else 0.0
+        ),
+        max_drawdown_percent=max_drawdown,
+        average_net_r=(
+            sum(net_r_values) / len(net_r_values) if net_r_values else None
+        ),
+    )
+
+
 def _stats_line(label: str, stats: PaperSetupStats) -> str:
     return (
         f"{label}: total={stats.total_setups}"
@@ -955,6 +1103,14 @@ def _signed(value: float | None) -> str:
 
 def _hours(value: float | None) -> str:
     return "N/A" if value is None else f"{value:.1f}h"
+
+
+def _usd(value: float | None) -> str:
+    return "N/A" if value is None else f"${value:,.2f}"
+
+
+def _pct_value(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:+.2f}%"
 
 
 if __name__ == "__main__":

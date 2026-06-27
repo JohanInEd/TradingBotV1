@@ -179,6 +179,7 @@ def test_shakeout_event_log_path_reads_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("BOT_PAPER_SETUP_JOURNAL_PATH", "logs/paper-setups.sqlite")
     monkeypatch.setenv("BOT_PAPER_SETUP_HORIZON_HOURS", "48")
     monkeypatch.setenv("BOT_HISTORY_DB_PATH", "data/history.sqlite")
+    monkeypatch.setenv("BOT_SYMBOLS", " BTC/USDT,eth/usdt,BTC/USDT, SOL/USDT ")
 
     settings = Settings.from_env()
 
@@ -195,6 +196,17 @@ def test_shakeout_event_log_path_reads_from_environment(monkeypatch) -> None:
     assert settings.paper_setup_horizon_hours == 48
     assert settings.history_db_path is not None
     assert settings.history_db_path.name == "history.sqlite"
+    assert settings.scanner_symbols == ("BTC/USDT", "ETH/USDT", "SOL/USDT")
+
+
+def test_default_scanner_symbols_include_major_futures_universe(monkeypatch) -> None:
+    monkeypatch.delenv("BOT_SYMBOLS", raising=False)
+
+    settings = Settings.from_env()
+
+    assert "DOGE/USDT" in settings.scanner_symbols
+    assert "SUI/USDT" in settings.scanner_symbols
+    assert "BTC/USDT" in settings.scanner_symbols
 
 
 def test_probability_backtest_falls_back_when_local_history_missing(tmp_path) -> None:

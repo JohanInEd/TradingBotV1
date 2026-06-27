@@ -37,10 +37,25 @@ DEFAULT_FEEDS = (
     ),
 )
 
+DEFAULT_SCANNER_SYMBOLS = (
+    "BTC/USDT",
+    "ETH/USDT",
+    "SOL/USDT",
+    "BNB/USDT",
+    "XRP/USDT",
+    "DOGE/USDT",
+    "ADA/USDT",
+    "LINK/USDT",
+    "AVAX/USDT",
+    "DOT/USDT",
+    "SUI/USDT",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
     symbol: str = "BTC/USDT"
+    scanner_symbols: tuple[str, ...] = ()
     timeframe: str = "4h"
     daily_timeframe: str = "1d"
     entry_timeframe: str = "1h"
@@ -55,6 +70,11 @@ class Settings:
     analysis_interval_hours: int = 4
     news_max_age_hours: int = 24
     headline_limit: int = 12
+    economic_calendar_enabled: bool = True
+    economic_calendar_path: Path | None = None
+    economic_calendar_lookahead_hours: int = 48
+    economic_calendar_pre_event_window_hours: int = 6
+    economic_calendar_post_event_window_hours: int = 2
     defensive_multiplier: float = 0.65
     buy_threshold: float = 0.65
     sell_threshold: float = -0.65
@@ -91,14 +111,19 @@ class Settings:
     signal_journal_path: Path | None = None
     paper_setup_journal_path: Path | None = None
     paper_setup_horizon_hours: int = 24
+    paper_ledger_fee_rate: float = 0.0004
+    paper_ledger_slippage_bps: float = 2.0
+    paper_ledger_funding_rate_8h: float = 0.0001
     history_db_path: Path | None = None
     feeds: tuple[NewsFeed, ...] = field(default_factory=lambda: DEFAULT_FEEDS)
 
     @classmethod
     def from_env(cls) -> "Settings":
+        exchange = os.getenv("BOT_EXCHANGE", "auto").lower()
         return cls(
             symbol=os.getenv("BOT_SYMBOL", "BTC/USDT").upper(),
-            exchange=os.getenv("BOT_EXCHANGE", "auto").lower(),
+            scanner_symbols=_env_symbols("BOT_SYMBOLS", DEFAULT_SCANNER_SYMBOLS),
+            exchange=exchange,
             market_refresh_seconds=_env_int("BOT_MARKET_REFRESH_SECONDS", 60, minimum=10),
             news_refresh_seconds=_env_int(
                 "BOT_NEWS_REFRESH_SECONDS", 600, minimum=60
@@ -109,6 +134,26 @@ class Settings:
             analysis_interval_hours=_env_int("BOT_ANALYSIS_INTERVAL_HOURS", 4, minimum=1),
             request_timeout_seconds=_env_float("BOT_HTTP_TIMEOUT_SECONDS", 12.0, minimum=1),
             headline_limit=_env_int("BOT_HEADLINE_LIMIT", 12, minimum=3),
+            economic_calendar_enabled=_env_bool("BOT_ECONOMIC_CALENDAR", True),
+            economic_calendar_path=_env_path("BOT_ECONOMIC_CALENDAR_PATH"),
+            economic_calendar_lookahead_hours=_env_int(
+                "BOT_ECONOMIC_CALENDAR_LOOKAHEAD_HOURS",
+                48,
+                minimum=1,
+                maximum=168,
+            ),
+            economic_calendar_pre_event_window_hours=_env_int(
+                "BOT_ECONOMIC_CALENDAR_PRE_EVENT_HOURS",
+                6,
+                minimum=0,
+                maximum=72,
+            ),
+            economic_calendar_post_event_window_hours=_env_int(
+                "BOT_ECONOMIC_CALENDAR_POST_EVENT_HOURS",
+                2,
+                minimum=0,
+                maximum=24,
+            ),
             paper_account_equity=_env_float(
                 "BOT_PAPER_ACCOUNT_EQUITY", 10_000.0, minimum=100.0
             ),
@@ -199,6 +244,18 @@ class Settings:
             paper_setup_horizon_hours=_env_int(
                 "BOT_PAPER_SETUP_HORIZON_HOURS", 24, minimum=4, maximum=168
             ),
+            paper_ledger_fee_rate=_env_float(
+                "BOT_PAPER_LEDGER_FEE_RATE", 0.0004, minimum=0.0, maximum=0.01
+            ),
+            paper_ledger_slippage_bps=_env_float(
+                "BOT_PAPER_LEDGER_SLIPPAGE_BPS", 2.0, minimum=0.0, maximum=100.0
+            ),
+            paper_ledger_funding_rate_8h=_env_float(
+                "BOT_PAPER_LEDGER_FUNDING_RATE_8H",
+                0.0001,
+                minimum=-0.01,
+                maximum=0.01,
+            ),
             history_db_path=_env_path("BOT_HISTORY_DB_PATH"),
         )
 
@@ -244,3 +301,18 @@ def _env_path(name: str) -> Path | None:
     if raw is None or not raw.strip():
         return None
     return Path(raw).expanduser()
+
+
+def _env_symbols(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for part in raw.split(","):
+        symbol = part.strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        symbols.append(symbol)
+        seen.add(symbol)
+    return tuple(symbols)

@@ -112,6 +112,7 @@ class RealtimeMarketStream:
                 self.settings.timeframe,
                 self.settings.daily_timeframe,
                 self.settings.entry_timeframe,
+                "30m",
             }:
                 tasks.append(
                     asyncio.create_task(

@@ -6,6 +6,7 @@ from btc_trading_bot.models import FuturesMetrics, Headline
 from btc_trading_bot.news import (
     NewsAnalyzer,
     blend_derivatives_crowding,
+    classify_headline,
     fear_greed_source_from_payload,
     gdelt_headlines_from_payload,
 )
@@ -34,6 +35,19 @@ def test_bullish_bitcoin_headline_scores_positive() -> None:
     assert result.label in {"Bullish", "Extremely Bullish"}
     assert result.sources
     assert result.sources[0].name == "Bitcoin headlines"
+    assert result.events
+    assert result.headlines[0].event_type == "ETF flows"
+
+
+def test_headline_classifier_tags_event_type_and_direction() -> None:
+    classified = classify_headline(
+        _headline("Bitcoin plunges as SEC crackdown sparks liquidation cascade")
+    )
+
+    assert classified.event_type == "SEC/regulation"
+    assert classified.event_impact == "HIGH"
+    assert classified.event_direction == "BEARISH"
+    assert classified.event_confidence > 0.8
 
 
 def test_fear_greed_source_maps_index_to_score() -> None:
@@ -100,6 +114,46 @@ def test_negative_macro_event_applies_defensive_multiplier() -> None:
     assert result.status in {"ELEVATED RISK", "HIGH RISK"}
     assert result.risk_multiplier < 1.0
     assert result.alerts
+    assert result.events
+
+
+def test_configured_economic_calendar_event_applies_event_risk(tmp_path) -> None:
+    now = datetime(2026, 6, 18, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "calendar.json"
+    path.write_text(
+        """
+        {
+          "events": [
+            {
+              "name": "FOMC rate decision",
+              "event_type": "Fed/rates",
+              "scheduled_at": "2026-06-18T14:00:00+00:00",
+              "impact": "HIGH"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    analyzer = NewsAnalyzer(
+        Settings(
+            economic_calendar_path=path,
+            economic_calendar_pre_event_window_hours=3,
+            economic_calendar_post_event_window_hours=1,
+        )
+    )
+    try:
+        calendar = analyzer.analyze_economic_calendar(now)
+        macro = analyzer.analyze_macro([], calendar=calendar)
+    finally:
+        analyzer.close()
+
+    assert calendar is not None
+    assert calendar.status == "HIGH EVENT RISK"
+    assert calendar.risk_multiplier < 1.0
+    assert calendar.active_events[0].name == "FOMC rate decision"
+    assert macro.status == "HIGH EVENT RISK"
+    assert macro.risk_multiplier == calendar.risk_multiplier
 
 
 def test_derivatives_crowding_blends_into_sentiment_sources() -> None:

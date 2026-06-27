@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import math
 import re
+import csv
+import json
+import calendar as calendar_module
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
 from typing import Iterable
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -18,9 +22,12 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from btc_trading_bot.config import NewsFeed, Settings
 from btc_trading_bot.models import (
+    EconomicCalendarEvent,
+    EconomicCalendarRisk,
     FuturesMetrics,
     Headline,
     MacroAnalysis,
+    NewsEventSummary,
     SentimentAnalysis,
     SentimentSource,
 )
@@ -54,6 +61,64 @@ SENTIMENT_SOURCE_WEIGHTS = {
     NEWS_SOURCE_NAME: 0.65,
     FEAR_GREED_SOURCE_NAME: 0.20,
     DERIVATIVES_SOURCE_NAME: 0.15,
+}
+EVENT_RULES = (
+    (
+        "ETF flows",
+        re.compile(r"\b(etf|exchange-traded fund|ibit|fbtc|gbtc|arkb)\b", re.IGNORECASE),
+        "HIGH",
+    ),
+    (
+        "Fed/rates",
+        re.compile(r"\b(federal reserve|the fed|fomc|rate cut|rate hike|interest rates?|hawkish|dovish)\b", re.IGNORECASE),
+        "HIGH",
+    ),
+    (
+        "CPI/inflation",
+        re.compile(r"\b(cpi|consumer price index|inflation|disinflation|core prices?)\b", re.IGNORECASE),
+        "HIGH",
+    ),
+    (
+        "Jobs report",
+        re.compile(r"\b(jobs report|nonfarm payrolls?|nfp|unemployment|labor market)\b", re.IGNORECASE),
+        "HIGH",
+    ),
+    (
+        "SEC/regulation",
+        re.compile(r"\b(sec|regulat(?:e|ion|or|ory)|lawsuit|settlement|approval|crackdown|ban)\b", re.IGNORECASE),
+        "HIGH",
+    ),
+    (
+        "Exchange security",
+        re.compile(r"\b(exchange|wallet|bridge|protocol).*\b(hack|hacked|exploit|breach|stolen)\b|\b(hack|hacked|exploit|breach|stolen)\b", re.IGNORECASE),
+        "HIGH",
+    ),
+    (
+        "Liquidation cascade",
+        re.compile(r"\b(liquidation|liquidations|liquidated|cascade|short squeeze|long squeeze)\b", re.IGNORECASE),
+        "HIGH",
+    ),
+    (
+        "Whale transfer",
+        re.compile(r"\b(whale|large transfer|wallet transfer|moves? bitcoin|btc transfer)\b", re.IGNORECASE),
+        "MEDIUM",
+    ),
+    (
+        "Stablecoin risk",
+        re.compile(r"\b(stablecoin|usdt|usdc|tether|depeg|reserve|attestation)\b", re.IGNORECASE),
+        "HIGH",
+    ),
+)
+POSITIVE_EVENT_PATTERN = re.compile(
+    r"\b(approval|approve|inflow|record inflow|rate cut|dovish|cooler than expected|"
+    r"beats expectations|adoption|rally|surge|breakout)\b",
+    re.IGNORECASE,
+)
+BUILT_IN_CALENDAR_TYPES = {
+    "CPI/inflation": "CPI/inflation",
+    "PPI/inflation": "CPI/inflation",
+    "Jobs report": "Jobs report",
+    "Fed/rates": "Fed/rates",
 }
 
 
@@ -161,12 +226,14 @@ class NewsAnalyzer:
             if age_seconds > cutoff_seconds:
                 continue
             parsed.append(
-                Headline(
-                    title=title,
-                    source=feed.name,
-                    url=_entry_url(entry),
-                    published_at=published,
-                    category=feed.category,
+                classify_headline(
+                    Headline(
+                        title=title,
+                        source=feed.name,
+                        url=_entry_url(entry),
+                        published_at=published,
+                        category=feed.category,
+                    )
                 )
             )
         return parsed
@@ -243,7 +310,7 @@ class NewsAnalyzer:
             recency_weight = math.pow(0.5, age_hours / 24.0)
             weighted_sum += score * recency_weight
             total_weight += recency_weight
-            scored.append(replace(headline, sentiment=score))
+            scored.append(classify_headline(replace(headline, sentiment=score)))
 
         headline_average = weighted_sum / total_weight if total_weight else 0.0
         headline_average = _clamp(headline_average)
@@ -264,9 +331,14 @@ class NewsAnalyzer:
             label=_sentiment_label(average),
             headlines=tuple(scored[: self.settings.headline_limit]),
             sources=tuple(source_breakdown),
+            events=event_summaries(scored),
         )
 
-    def analyze_macro(self, headlines: Iterable[Headline]) -> MacroAnalysis:
+    def analyze_macro(
+        self,
+        headlines: Iterable[Headline],
+        calendar: EconomicCalendarRisk | None = None,
+    ) -> MacroAnalysis:
         relevant: list[Headline] = []
         negative_alerts: list[Headline] = []
         scores: list[float] = []
@@ -275,7 +347,7 @@ class NewsAnalyzer:
             if not MACRO_PATTERN.search(headline.title):
                 continue
             score = self.analyzer.polarity_scores(headline.title)["compound"]
-            scored = replace(headline, sentiment=score)
+            scored = classify_headline(replace(headline, sentiment=score))
             relevant.append(scored)
             if score <= -0.20 or NEGATIVE_RISK_PATTERN.search(headline.title):
                 negative_alerts.append(scored)
@@ -301,13 +373,109 @@ class NewsAnalyzer:
             status = "NO MAJOR ALERTS"
             multiplier = 1.0
 
+        if calendar is not None and calendar.risk_multiplier < 1.0:
+            multiplier = min(multiplier, calendar.risk_multiplier)
+            if status == "NO MAJOR ALERTS":
+                status = calendar.status
+            elif status != "HIGH RISK" and calendar.status == "HIGH EVENT RISK":
+                status = "HIGH RISK"
+
         displayed = negative_alerts if negative_alerts else relevant
         return MacroAnalysis(
             score=average,
             status=status,
             risk_multiplier=multiplier,
             alerts=tuple(displayed[:6]),
+            events=event_summaries(relevant),
+            calendar=calendar,
         )
+
+    def analyze_economic_calendar(
+        self,
+        now: datetime | None = None,
+    ) -> EconomicCalendarRisk | None:
+        if not self.settings.economic_calendar_enabled:
+            return None
+        now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        events = [
+            *self._load_configured_calendar_events(now),
+            *_built_in_calendar_events(now, self.settings.economic_calendar_lookahead_hours),
+        ]
+        lookahead_until = now + timedelta(
+            hours=self.settings.economic_calendar_lookahead_hours
+        )
+        pre = timedelta(hours=self.settings.economic_calendar_pre_event_window_hours)
+        post = timedelta(hours=self.settings.economic_calendar_post_event_window_hours)
+        active = tuple(
+            event
+            for event in events
+            if event.scheduled_at - pre <= now <= event.scheduled_at + post
+        )
+        upcoming = tuple(
+            event
+            for event in events
+            if now < event.scheduled_at <= lookahead_until and event not in active
+        )
+        if active:
+            high_impact = any(event.impact == "HIGH" for event in active)
+            status = "HIGH EVENT RISK" if high_impact else "ELEVATED EVENT RISK"
+            multiplier = 0.55 if high_impact else 0.75
+            names = ", ".join(event.name for event in active[:3])
+            reason = f"Inside configured event window for {names}."
+        elif upcoming:
+            status = "EVENT WATCH"
+            multiplier = 1.0
+            next_event = min(upcoming, key=lambda event: event.scheduled_at)
+            hours = (next_event.scheduled_at - now).total_seconds() / 3600.0
+            reason = f"Next high-impact calendar event: {next_event.name} in {hours:.1f}h."
+        else:
+            status = "NO SCHEDULED EVENTS"
+            multiplier = 1.0
+            reason = "No configured high-impact events inside the lookahead window."
+        return EconomicCalendarRisk(
+            status=status,
+            risk_multiplier=multiplier,
+            active_events=tuple(sorted(active, key=lambda event: event.scheduled_at)),
+            upcoming_events=tuple(sorted(upcoming, key=lambda event: event.scheduled_at)[:8]),
+            reason=reason,
+        )
+
+    def _load_configured_calendar_events(
+        self,
+        now: datetime,
+    ) -> tuple[EconomicCalendarEvent, ...]:
+        path = self.settings.economic_calendar_path
+        if path is None or not path.exists():
+            return ()
+        rows: list[dict[str, object]]
+        if path.suffix.lower() == ".json":
+            with path.open("r", encoding="utf-8") as file:
+                payload = json.load(file)
+            if isinstance(payload, list):
+                rows = payload
+            elif isinstance(payload, dict):
+                rows = payload.get("events", [])
+            else:
+                rows = []
+        else:
+            with path.open("r", encoding="utf-8", newline="") as file:
+                rows = list(csv.DictReader(file))
+        events: list[EconomicCalendarEvent] = []
+        lower_bound = now - timedelta(
+            hours=self.settings.economic_calendar_post_event_window_hours
+        )
+        upper_bound = now + timedelta(
+            hours=self.settings.economic_calendar_lookahead_hours
+        )
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            event = _calendar_event_from_row(row)
+            if event is None:
+                continue
+            if lower_bound <= event.scheduled_at <= upper_bound:
+                events.append(event)
+        return tuple(events)
 
     def close(self) -> None:
         pass
@@ -337,6 +505,7 @@ def blend_derivatives_crowding(
         label=_sentiment_label(score),
         headlines=sentiment.headlines,
         sources=sources,
+        events=sentiment.events,
     )
 
 
@@ -427,17 +596,230 @@ def gdelt_headlines_from_payload(
         domain = str(article.get("domain") or "GDELT")
         category = "crypto" if BITCOIN_PATTERN.search(title) else "macro"
         headlines.append(
-            Headline(
-                title=title,
-                source=f"GDELT: {domain}",
-                url=str(article.get("url") or ""),
-                published_at=published,
-                category=category,
+            classify_headline(
+                Headline(
+                    title=title,
+                    source=f"GDELT: {domain}",
+                    url=str(article.get("url") or ""),
+                    published_at=published,
+                    category=category,
+                )
             )
         )
     if not headlines:
         raise ValueError("GDELT returned no recent matching articles")
     return headlines
+
+
+def classify_headline(headline: Headline) -> Headline:
+    event_type = "general"
+    impact = "LOW"
+    confidence = 0.0
+    for candidate_type, pattern, candidate_impact in EVENT_RULES:
+        if pattern.search(headline.title):
+            event_type = candidate_type
+            impact = candidate_impact
+            confidence = 0.85 if candidate_impact == "HIGH" else 0.65
+            break
+    direction = _event_direction(headline.title, headline.sentiment)
+    return replace(
+        headline,
+        event_type=event_type,
+        event_impact=impact,
+        event_direction=direction,
+        event_confidence=confidence,
+    )
+
+
+def event_summaries(headlines: Iterable[Headline]) -> tuple[NewsEventSummary, ...]:
+    grouped: dict[str, list[Headline]] = {}
+    for headline in headlines:
+        if headline.event_type == "general":
+            continue
+        grouped.setdefault(headline.event_type, []).append(headline)
+    summaries: list[NewsEventSummary] = []
+    for event_type, items in grouped.items():
+        latest = max(items, key=lambda item: item.published_at)
+        average = sum(item.sentiment for item in items) / len(items)
+        impact = _max_impact(item.event_impact for item in items)
+        summaries.append(
+            NewsEventSummary(
+                event_type=event_type,
+                count=len(items),
+                average_sentiment=_clamp(average),
+                impact=impact,
+                direction=_event_direction(latest.title, average),
+                latest_at=latest.published_at,
+                representative_title=latest.title,
+            )
+        )
+    return tuple(
+        sorted(
+            summaries,
+            key=lambda item: (
+                {"HIGH": 2, "MEDIUM": 1, "LOW": 0}.get(item.impact, 0),
+                item.latest_at or datetime.min.replace(tzinfo=timezone.utc),
+            ),
+            reverse=True,
+        )
+    )
+
+
+def _event_direction(title: str, sentiment: float) -> str:
+    if NEGATIVE_RISK_PATTERN.search(title):
+        return "BEARISH"
+    if POSITIVE_EVENT_PATTERN.search(title):
+        return "BULLISH"
+    if sentiment >= 0.15:
+        return "BULLISH"
+    if sentiment <= -0.15:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+def _max_impact(values: Iterable[str]) -> str:
+    rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+    return max(values, key=lambda value: rank.get(value, 0), default="LOW")
+
+
+def _calendar_event_from_row(row: dict[str, object]) -> EconomicCalendarEvent | None:
+    name = str(row.get("name") or row.get("event") or "").strip()
+    raw_time = row.get("scheduled_at") or row.get("time") or row.get("datetime")
+    if not name or raw_time is None:
+        return None
+    try:
+        scheduled_at = _parse_calendar_datetime(raw_time)
+    except (TypeError, ValueError):
+        return None
+    event_type = str(row.get("event_type") or row.get("type") or name).strip()
+    event_type = BUILT_IN_CALENDAR_TYPES.get(event_type, event_type)
+    impact = str(row.get("impact") or "HIGH").strip().upper()
+    if impact not in {"LOW", "MEDIUM", "HIGH"}:
+        impact = "HIGH"
+    source = str(row.get("source") or "configured").strip() or "configured"
+    return EconomicCalendarEvent(
+        name=name,
+        event_type=event_type,
+        scheduled_at=scheduled_at,
+        impact=impact,
+        source=source,
+    )
+
+
+def _built_in_calendar_events(
+    now: datetime,
+    lookahead_hours: int,
+) -> tuple[EconomicCalendarEvent, ...]:
+    start = (now - timedelta(hours=12)).date()
+    end = (now + timedelta(hours=lookahead_hours)).date()
+    days = (end - start).days + 1
+    events: list[EconomicCalendarEvent] = []
+    for offset in range(days):
+        day = start + timedelta(days=offset)
+        if _is_first_friday(day):
+            events.append(
+                _ny_event(
+                    "U.S. jobs report / NFP",
+                    "Jobs report",
+                    day.year,
+                    day.month,
+                    day.day,
+                    8,
+                    30,
+                )
+            )
+        if _is_second_weekday(day, weekday=2):
+            events.append(
+                _ny_event(
+                    "U.S. CPI inflation release",
+                    "CPI/inflation",
+                    day.year,
+                    day.month,
+                    day.day,
+                    8,
+                    30,
+                )
+            )
+        if _is_second_weekday(day, weekday=3):
+            events.append(
+                _ny_event(
+                    "U.S. PPI inflation release",
+                    "CPI/inflation",
+                    day.year,
+                    day.month,
+                    day.day,
+                    8,
+                    30,
+                )
+            )
+        if day.month in {1, 3, 4, 6, 7, 9, 10, 12} and _is_last_weekday(day, 2):
+            events.append(
+                _ny_event(
+                    "FOMC rate decision watch",
+                    "Fed/rates",
+                    day.year,
+                    day.month,
+                    day.day,
+                    14,
+                    0,
+                )
+            )
+    return tuple(
+        event
+        for event in events
+        if now - timedelta(hours=12)
+        <= event.scheduled_at
+        <= now + timedelta(hours=lookahead_hours)
+    )
+
+
+def _ny_event(
+    name: str,
+    event_type: str,
+    year: int,
+    month: int,
+    day: int,
+    hour: int,
+    minute: int,
+) -> EconomicCalendarEvent:
+    scheduled_at = datetime(
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        tzinfo=ZoneInfo("America/New_York"),
+    ).astimezone(timezone.utc)
+    return EconomicCalendarEvent(
+        name=name,
+        event_type=event_type,
+        scheduled_at=scheduled_at,
+        impact="HIGH",
+        source="built-in recurring watch",
+    )
+
+
+def _parse_calendar_datetime(value: object) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_first_friday(day) -> bool:
+    return day.weekday() == 4 and 1 <= day.day <= 7
+
+
+def _is_second_weekday(day, *, weekday: int) -> bool:
+    return day.weekday() == weekday and 8 <= day.day <= 14
+
+
+def _is_last_weekday(day, weekday: int) -> bool:
+    _, days_in_month = calendar_module.monthrange(day.year, day.month)
+    return day.weekday() == weekday and day.day + 7 > days_in_month
 
 
 def _build_session(settings: Settings) -> requests.Session:

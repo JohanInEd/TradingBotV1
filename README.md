@@ -21,9 +21,15 @@ uses the public perpetual-contract quote as its reference.
 - Bitcoin news sentiment, 30%: recency-weighted VADER sentiment from recent
   CoinDesk, Cointelegraph, Decrypt RSS headlines, GDELT market headlines, the
   Crypto Fear & Greed Index, and Binance USD-M derivatives crowding when
-  available.
+  available. Headlines are also classified into structured event buckets such
+  as ETF flows, Fed/rates, CPI/inflation, jobs report, SEC/regulation,
+  exchange security, liquidation cascade, whale transfer, and stablecoin risk.
 - Macro factor, 30%: Federal Reserve, FOMC, rates, CPI, inflation, central-bank,
   regulation, and liquidation headlines from RSS and GDELT.
+- A high-impact economic calendar risk layer watches configured events and a
+  built-in recurring U.S. macro schedule approximation for CPI, PPI, jobs/NFP,
+  and FOMC decision windows. It can reduce bullish confluence around event
+  windows even when headlines are quiet.
 - A detected negative macro event reduces any positive confluence score with a
   defensive multiplier. It does not suppress bearish signals.
 - Score above `+0.65`: `STRONG BUY`; below `-0.65`: `STRONG SELL`; otherwise:
@@ -156,6 +162,14 @@ paper futures guidance. This chart is designed to make confirmation and risk
 context easier to read; it does not make predictions with certainty and does
 not place trades.
 
+The map is interactive in the React dashboard. Range buttons switch between
+1-day, 3-day, 7-day, 14-day, 30-day, and full-history views; the chart can be
+dragged horizontally to inspect older candles; and hover crosshairs show candle
+OHLC, volume, RSI, MACD histogram, EMA values, ADX, and trend state. Overlay
+toggles control EMA/VWAP, Bollinger bands, support/resistance, scenario paths,
+paper setup entry/stop/take-profit lines, long/short zones, and the trend
+ribbon.
+
 The Long / Short Map also includes a muted 7-day scenario overlay built from
 historical closed 4-hour candle setups with similar technical score, EMA trend,
 RSI, MACD histogram, ATR/volatility context, and range position. It maps
@@ -170,18 +184,27 @@ prediction, and remains paper-only/informational.
 | --- | ---: | --- |
 | `BOT_EXCHANGE` | `auto` | `auto`, `kraken`, `binance`, or `binance-usdm` |
 | `BOT_SYMBOL` | `BTC/USDT` | CCXT symbol; USD-M mode adds `:USDT` when omitted |
+| `BOT_SYMBOLS` | unset | Optional comma-separated symbols for the Long / Short Scanner |
 | `BOT_MARKET_REFRESH_SECONDS` | `60` | REST fallback and futures-metrics interval |
 | `BOT_NEWS_REFRESH_SECONDS` | `600` | Independent RSS refresh, minimum 60 |
 | `BOT_STREAM_STALE_SECONDS` | `15` | Age before REST ticker fallback |
 | `BOT_ANALYSIS_INTERVAL_HOURS` | `4` | Analysis boundary interval |
 | `BOT_HTTP_TIMEOUT_SECONDS` | `12` | Exchange and news HTTP timeout |
 | `BOT_HEADLINE_LIMIT` | `12` | Headlines shown in the dashboard |
+| `BOT_ECONOMIC_CALENDAR` | `true` | Enable scheduled high-impact macro event watch |
+| `BOT_ECONOMIC_CALENDAR_PATH` | unset | Optional JSON or CSV calendar file with `name`, `event_type`, `scheduled_at`, `impact` |
+| `BOT_ECONOMIC_CALENDAR_LOOKAHEAD_HOURS` | `48` | Hours ahead to show configured or built-in macro events |
+| `BOT_ECONOMIC_CALENDAR_PRE_EVENT_HOURS` | `6` | Hours before a scheduled event to apply event-risk multiplier |
+| `BOT_ECONOMIC_CALENDAR_POST_EVENT_HOURS` | `2` | Hours after a scheduled event to keep event-risk multiplier active |
 | `BOT_PAPER_ACCOUNT_EQUITY` | `10000` | Paper account value used for sizing |
 | `BOT_RISK_PER_TRADE` | `0.005` | Maximum planned loss as equity fraction |
 | `BOT_STOP_LOSS_PERCENT` | `0.015` | Stop distance from entry |
 | `BOT_REWARD_TO_RISK` | `2.0` | Take-profit distance relative to stop |
 | `BOT_FUTURES_LEVERAGE` | `1` | Paper leverage, capped at 3 |
 | `BOT_MAX_POSITION_FRACTION` | `0.25` | Maximum margin allocation |
+| `BOT_PAPER_LEDGER_FEE_RATE` | `0.0004` | Per-side fee rate used by the paper ledger net PnL model |
+| `BOT_PAPER_LEDGER_SLIPPAGE_BPS` | `2.0` | Per-side slippage estimate in basis points for paper ledger net PnL |
+| `BOT_PAPER_LEDGER_FUNDING_RATE_8H` | `0.0001` | Assumed 8-hour funding rate for paper ledger net PnL |
 | `BOT_PRICE_RANGE_HORIZON_HOURS` | `24` | Historical low/high estimate horizon |
 | `BOT_PRICE_RANGE_LOOKBACK_CANDLES` | `180` | Recent 4h candles used for range samples |
 | `BOT_PROBABILITY_HORIZON_HOURS` | `24` | Horizon for candle-only directional and TP/SL probability |
@@ -204,6 +227,21 @@ prediction, and remains paper-only/informational.
 | `BOT_PAPER_SETUP_JOURNAL_PATH` | unset | Optional SQLite file for closed-candle GO LONG / GO SHORT paper setup tracking |
 | `BOT_PAPER_SETUP_HORIZON_HOURS` | `24` | Hours before an unresolved paper setup is marked `EXPIRED` |
 | `BOT_HISTORY_DB_PATH` | unset | Optional SQLite file for public OHLCV history used by offline analysis and probability calibration |
+
+To scan a multi-coin futures universe for paper long/short candidates, set
+`BOT_SYMBOLS` before starting the terminal bot or web API:
+
+```powershell
+$env:BOT_EXCHANGE = "binance-usdm"
+$env:BOT_SYMBOLS = "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT,DOGE/USDT,ADA/USDT,LINK/USDT,AVAX/USDT,DOT/USDT,SUI/USDT"
+btc-tri-factor-web
+```
+
+The scanner ranks each symbol with the same completed-candle technical
+confirmation, current market sentiment, macro filter, and paper futures action
+used by the main BTC view. Symbols are reported as `GO LONG`, `GO SHORT`,
+`STAY FLAT`, or `UNAVAILABLE`. This scanner is still signal-only and does not
+place orders.
 
 To record live public depth, aggregate trade, liquidation, open-interest, and
 top-trader crowding inputs for later shakeout review:
@@ -303,8 +341,10 @@ btc-paper-setups data/paper-setups.sqlite
 The analyzer reports total setups, open setups, TP count, SL count, expired
 count, win rate, expected R, average time to outcome, and grouped results by
 side, score bucket, market regime, volatility regime, and trend/range context.
-The web dashboard also shows a compact live summary from this same SQLite
-journal when `BOT_PAPER_SETUP_JOURNAL_PATH` is set.
+It also computes a paper-trading ledger from the same rows, including gross
+PnL, net PnL after estimated fees/slippage/funding, return percent, average
+net R, and max drawdown. The web dashboard shows this compact live summary when
+`BOT_PAPER_SETUP_JOURNAL_PATH` is set.
 This paper setup layer is still signal-only and paper-only. It does not request
 exchange credentials, call private APIs, place real orders, or auto-trade.
 
@@ -340,6 +380,30 @@ realized volatility, range position, trend spread, 4h/12h/24h forward movement,
 long and short TP/SL first-hit outcomes, and expected R. Results are grouped by
 timeframe, score bucket, market regime, volatility regime, trend/range context,
 future movement bucket, and long/short TP/SL outcome.
+
+Run an offline multi-coin futures simulator against locally stored candles:
+
+```powershell
+$env:BOT_HISTORY_DB_PATH = "data/history.sqlite"
+btc-futures-sim --exchange binance-usdm --symbols BTC/USDT,ETH/USDT,SOL/USDT,SUI/USDT --leverage 3 --fee-rate 0.0004 --funding-rate-8h 0.0001
+```
+
+The simulator replays completed 1-hour candles while aligning the latest
+completed daily and 1-hour entry-timing candles for the same symbol. Use
+`--primary-timeframe 4h` to compare the older 4-hour trade cadence, or pass
+another synced public candle timeframe. Because historical
+headline sentiment and macro state are not available from candle history, this
+is a candle-only technical replay using the same multi-timeframe confirmation
+gate as the live scanner. It reports win rate, gross and net expected R, net
+PnL, fees, funding, return, max drawdown, liquidation-risk count, and
+liquidation touches per symbol and overall. It uses public candles only, applies
+conservative same-candle assumptions, and does not place orders.
+
+Before simulating a symbol, sync all required timeframes:
+
+```powershell
+btc-history-sync --exchange binance-usdm --symbol SUI/USDT:USDT --timeframes 1h,4h,1d
+```
 
 ## Test
 

@@ -13,6 +13,7 @@ from btc_trading_bot.paper_setups import (
     OUTCOME_TP,
     PaperSetupJournal,
     analyze_setup_rows,
+    build_paper_ledger_trades,
     build_current_paper_setup,
     format_paper_setup_report,
     resolve_setup_outcome,
@@ -246,6 +247,44 @@ def test_paper_setup_analyzer_summary_and_groups() -> None:
     assert report.groups["side"]["LONG"].total_setups == 2
     assert "Overall: total=3 open=1 TP=1 SL=1 expired=0" in output
     assert "By volatility regime:" in output
+
+
+def test_paper_ledger_calculates_net_pnl_after_costs(tmp_path) -> None:
+    closed_at = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+    settings = replace(
+        SETTINGS,
+        paper_ledger_fee_rate=0.001,
+        paper_ledger_slippage_bps=10.0,
+        paper_ledger_funding_rate_8h=0.0002,
+    )
+    with PaperSetupJournal(tmp_path / "paper.sqlite", horizon_hours=24) as journal:
+        _record_setup(journal, _paper_evaluation(closed_at=closed_at))
+        journal.resolve_with_candles(
+            [
+                {
+                    "timestamp": closed_at + timedelta(hours=4),
+                    "high": 102.5,
+                    "low": 99.5,
+                    "close": 102.1,
+                }
+            ],
+            exchange=EXCHANGE,
+            symbol=SYMBOL,
+            timeframe=TIMEFRAME,
+        )
+        rows = journal.load_setups()
+
+    trades = build_paper_ledger_trades(rows, settings=settings)
+    report = analyze_setup_rows(rows, settings=settings)
+
+    assert len(trades) == 1
+    assert trades[0].gross_pnl > trades[0].net_pnl
+    assert trades[0].fees > 0
+    assert trades[0].slippage > 0
+    assert report.ledger is not None
+    assert report.ledger.closed_trades == 1
+    assert report.ledger.net_pnl == pytest.approx(trades[0].net_pnl)
+    assert report.recent_trades[0].net_r == pytest.approx(trades[0].net_r)
 
 
 def test_web_api_payload_includes_current_paper_setup_shape() -> None:

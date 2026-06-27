@@ -1,8 +1,13 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 
+from btc_trading_bot.config import Settings
 from btc_trading_bot.models import ScenarioForecast, ScenarioPathPoint
-from btc_trading_bot.web import _jsonable
+from btc_trading_bot.web import (
+    _jsonable,
+    build_confidence_score,
+    build_simulator_summary,
+)
 from tests.test_app import _evaluation
 
 
@@ -71,3 +76,21 @@ def test_jsonable_serializes_scenario_forecast_shape() -> None:
     assert forecast["up_probability"] == 0.55
     assert forecast["median_path"][0]["price"] == 101.0
     assert datetime.fromisoformat(forecast["median_path"][0]["time"]) == now
+
+
+def test_confidence_score_serializes_for_web_payload() -> None:
+    confidence = build_confidence_score(_evaluation())
+    payload = _jsonable(confidence)
+
+    assert payload["label"] in {"LOW", "MEDIUM", "HIGH"}
+    assert 0 <= payload["score"] <= 1
+    assert payload["action"] in {"GO LONG", "GO SHORT", "STAY FLAT"}
+    assert len(payload["factors"]) == 5
+    assert payload["factors"][0]["label"] == "Signal strength"
+
+
+def test_simulator_summary_reports_missing_configuration() -> None:
+    summary = build_simulator_summary(Settings(history_db_path=None))
+
+    assert summary["status"] == "not_configured"
+    assert "BOT_HISTORY_DB_PATH" in summary["message"]

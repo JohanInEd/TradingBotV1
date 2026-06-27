@@ -6,6 +6,7 @@ function App() {
   const [snapshot, setSnapshot] = useState(null);
   const [connection, setConnection] = useState("connecting");
   const [error, setError] = useState(null);
+  const [selectedTradeMode, setSelectedTradeMode] = useState("4h");
   const connectionRef = useRef("connecting");
 
   useEffect(() => {
@@ -85,6 +86,17 @@ function App() {
   const shakeout = evaluation?.shakeout;
   const tradeFilter = evaluation?.trade_filter;
   const paperJournal = snapshot?.paper_journal;
+  const scanner = evaluation?.scanner;
+  const confidence = snapshot?.confidence;
+  const simulator = snapshot?.simulator;
+  const tradeModes = snapshot?.trade_modes;
+
+  useEffect(() => {
+    const modes = tradeModes?.modes;
+    if (!modes || modes[selectedTradeMode]) return;
+    const fallback = tradeModes?.selected ?? Object.keys(modes)[0] ?? "4h";
+    setSelectedTradeMode(fallback);
+  }, [tradeModes, selectedTradeMode]);
 
   const allHeadlines = useMemo(() => {
     const crypto = sentiment?.headlines ?? [];
@@ -116,6 +128,12 @@ function App() {
                 value={signal.signal}
                 detail={`Score ${formatNumber(signal.score, 3)} / Raw ${formatNumber(signal.raw_score, 3)}`}
                 tone={signal.score > 0.2 ? "positive" : signal.score < -0.2 ? "negative" : "neutral"}
+              />
+              <MetricCard
+                label="Confidence"
+                value={`${formatNumber(confidence?.percent, 1)}% ${confidence?.label ?? ""}`}
+                detail={confidence?.action ? `${confidence.action} - ${confidence.summary}` : "Waiting for confidence context"}
+                tone={confidenceTone(confidence)}
               />
               <MetricCard
                 label={`${probability?.horizon_hours ?? 24}h Backtest Odds`}
@@ -161,11 +179,29 @@ function App() {
               />
             </section>
 
-            <DecisionChart evaluation={evaluation} chart={chart} />
+            <DecisionChart
+              evaluation={evaluation}
+              chart={chart}
+              tradeModes={tradeModes}
+              selectedTimeframe={selectedTradeMode}
+              onSelectTimeframe={setSelectedTradeMode}
+            />
+
+            <ScannerPanel scanner={scanner} />
+
+            <section className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+              <ConfidencePanel confidence={confidence} />
+              <SimulatorPanel simulator={simulator} />
+            </section>
 
             <section className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
               <SignalPanel evaluation={evaluation} futures={futures} paperSetup={paperSetup} futuresMetrics={futuresMetrics} probability={probability} priceRange={priceRange} shakeout={shakeout} tradeFilter={tradeFilter} />
-              <NewsPanel headlines={allHeadlines} sources={sentiment?.sources ?? []} />
+              <NewsPanel
+                headlines={allHeadlines}
+                sources={sentiment?.sources ?? []}
+                events={sentiment?.events ?? []}
+                macro={macro}
+              />
             </section>
 
             <PaperJournalPanel report={paperJournal} />
@@ -181,19 +217,65 @@ function App() {
   );
 }
 
-function DecisionChart({ evaluation, chart }) {
+function DecisionChart({ evaluation, chart, tradeModes, selectedTimeframe, onSelectTimeframe }) {
+  const modeOptions = tradeModes?.options ?? [
+    { timeframe: "4h", label: "4h Trade" },
+    { timeframe: "1h", label: "1h Trade" },
+    { timeframe: "30m", label: "30min Trade" }
+  ];
+  const modeMap = tradeModes?.modes ?? {};
+  const activeTimeframe = modeMap[selectedTimeframe]
+    ? selectedTimeframe
+    : tradeModes?.selected ?? chart?.timeframe ?? "4h";
+  const activeMode = modeMap[activeTimeframe];
+  const activeChart = activeMode?.chart ?? chart;
+  const modeEvaluation = activeMode?.available
+    ? {
+        ...evaluation,
+        technical: activeMode.technical ?? evaluation.technical,
+        live_technical: activeMode.technical ?? evaluation.live_technical,
+        signal: activeMode.signal ?? evaluation.signal,
+        futures: activeMode.futures ?? evaluation.futures,
+        trade_filter: activeMode.trade_filter ?? evaluation.trade_filter,
+        paper_setup: activeMode.paper_setup ?? null,
+        price_range: activeMode.price_range ?? null,
+        probability_forecast: activeMode.probability_forecast ?? null,
+        scenario_forecast: activeMode.scenario_forecast ?? null,
+        market_context: activeMode.market_context ?? null
+      }
+    : evaluation;
   const candles = useMemo(
-    () => (chart?.candles ?? []).filter((candle) => isFiniteNumber(candle.close)),
-    [chart]
+    () => (activeChart?.candles ?? []).filter((candle) => isFiniteNumber(candle.close)),
+    [activeChart]
   );
-  const technical = evaluation.live_technical ?? evaluation.technical;
-  const decision = useMemo(() => buildDecision(evaluation), [evaluation]);
-  const scenarioForecast = evaluation.scenario_forecast;
+  const [rangeKey, setRangeKey] = useState("7D");
+  const [panOffset, setPanOffset] = useState(0);
+  const [overlays, setOverlays] = useState({
+    ema: true,
+    vwap: true,
+    bollinger: true,
+    levels: true,
+    scenario: true,
+    setup: true,
+    zones: true,
+    ribbon: true
+  });
+  const technical = modeEvaluation.live_technical ?? modeEvaluation.technical;
+  const decision = useMemo(() => buildDecision(modeEvaluation), [modeEvaluation]);
+  const scenarioForecast = modeEvaluation.scenario_forecast;
 
   if (!candles.length) {
     return (
       <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
-        <h2 className="text-xl font-semibold">BTC Long / Short Map</h2>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <h2 className="text-xl font-semibold">BTC Long / Short Map</h2>
+          <TradeModeSelector
+            options={modeOptions}
+            activeTimeframe={activeTimeframe}
+            modes={modeMap}
+            onSelect={onSelectTimeframe}
+          />
+        </div>
         <p className="mt-4 rounded-2xl bg-black/20 p-4 text-sm text-slate-400">
           Waiting for candle history before drawing the decision map.
         </p>
@@ -203,9 +285,37 @@ function DecisionChart({ evaluation, chart }) {
 
   const latest = candles[candles.length - 1];
   const currentPrice = evaluation.market?.price ?? latest.close;
-  const priceRange = evaluation.price_range;
+  const priceRange = modeEvaluation.price_range;
   const futuresMetrics = evaluation.futures_metrics;
   const shakeout = evaluation.shakeout;
+  const paperSetup = modeEvaluation.paper_setup;
+  const tradeFilter = modeEvaluation.trade_filter;
+  const probability = modeEvaluation.probability_forecast;
+  const marketContext = modeEvaluation.market_context;
+  const candlesPerDay = candlesPerDayFor(activeChart?.timeframe ?? activeTimeframe);
+  const rangeOptions = [
+    ["1D", candlesPerDay],
+    ["3D", candlesPerDay * 3],
+    ["7D", candlesPerDay * 7],
+    ["14D", candlesPerDay * 14],
+    ["30D", candlesPerDay * 30],
+    ["All", candles.length]
+  ];
+  const visibleCount = Math.min(candles.length, rangeOptions.find(([key]) => key === rangeKey)?.[1] ?? 42);
+  const maxOffset = Math.max(0, candles.length - visibleCount);
+  const normalizedOffset = Math.min(maxOffset, Math.max(0, panOffset));
+  const startIndex = Math.max(0, candles.length - visibleCount - normalizedOffset);
+  const visibleCandles = candles.slice(startIndex, startIndex + visibleCount);
+  const setZoomRange = (key) => {
+    setRangeKey(key);
+    setPanOffset(0);
+  };
+  const panByCandles = (delta) => {
+    setPanOffset((value) => Math.min(maxOffset, Math.max(0, value + delta)));
+  };
+  const toggleOverlay = (key) => {
+    setOverlays((value) => ({ ...value, [key]: !value[key] }));
+  };
 
   return (
     <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
@@ -213,24 +323,87 @@ function DecisionChart({ evaluation, chart }) {
         <div>
           <h2 className="text-xl font-semibold">BTC Long / Short Map</h2>
           <p className="mt-1 text-sm text-slate-400">
-            {chart?.timeframe ?? "4h"} candles with trend, momentum, volatility, volume, and futures pressure.
+            {activeChart?.timeframe ?? "4h"} candles with independent trend, momentum, volatility, probability, and paper setup context.
           </p>
         </div>
-        <div className="grid gap-3 sm:grid-cols-3 lg:min-w-[30rem]">
-          <DecisionGauge label="Long" value={decision.long} tone="positive" />
-          <DecisionGauge label="Short" value={decision.short} tone="negative" />
-          <DecisionGauge label="Flat" value={decision.flat} tone="neutral" />
+        <div className="flex flex-col gap-3 lg:min-w-[36rem]">
+          <TradeModeSelector
+            options={modeOptions}
+            activeTimeframe={activeTimeframe}
+            modes={modeMap}
+            onSelect={onSelectTimeframe}
+          />
+          <div className="grid gap-3 sm:grid-cols-3">
+            <DecisionGauge label="Long" value={decision.long} tone="positive" />
+            <DecisionGauge label="Short" value={decision.short} tone="negative" />
+            <DecisionGauge label="Flat" value={decision.flat} tone="neutral" />
+          </div>
         </div>
       </div>
 
       <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_21rem]">
         <div className="rounded-2xl bg-black/20 p-4">
+          <div className="mb-4 flex flex-col gap-3 2xl:flex-row 2xl:items-center 2xl:justify-between">
+            <div className="flex flex-wrap gap-2">
+              {rangeOptions.map(([key]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setZoomRange(key)}
+                  className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${rangeKey === key ? "border-cyan-300/60 bg-cyan-300/15 text-cyan-100" : "border-white/10 bg-white/5 text-slate-300 hover:border-cyan-300/40"}`}
+                >
+                  {key}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => panByCandles(Math.max(4, Math.floor(visibleCount / 3)))}
+                className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300 hover:border-cyan-300/40"
+              >
+                Older
+              </button>
+              <button
+                type="button"
+                onClick={() => panByCandles(-Math.max(4, Math.floor(visibleCount / 3)))}
+                className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300 hover:border-cyan-300/40"
+              >
+                Newer
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {[
+                ["ema", "EMA"],
+                ["vwap", "VWAP"],
+                ["bollinger", "Bands"],
+                ["levels", "Levels"],
+                ["scenario", "Scenario"],
+                ["setup", "Setup"],
+                ["zones", "Zones"],
+                ["ribbon", "Trend"]
+              ].map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => toggleOverlay(key)}
+                  className={`rounded-lg border px-3 py-2 text-xs font-medium transition ${overlays[key] ? "border-slate-300/30 bg-slate-300/10 text-slate-100" : "border-white/10 bg-transparent text-slate-500"}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
           <PriceDecisionSvg
-            candles={candles}
+            candles={visibleCandles}
+            allCandles={candles}
+            visibleStartIndex={startIndex}
+            visibleCount={visibleCount}
+            onPan={panByCandles}
             currentPrice={currentPrice}
             priceRange={priceRange}
             decision={decision}
             scenarioForecast={scenarioForecast}
+            paperSetup={paperSetup}
+            overlays={overlays}
           />
           <div className="mt-4 grid gap-2 text-xs text-slate-400 sm:grid-cols-3 lg:grid-cols-7">
             <LegendItem color="bg-emerald-300" label="EMA 20" />
@@ -252,11 +425,17 @@ function DecisionChart({ evaluation, chart }) {
           <ScenarioMapCard forecast={scenarioForecast} />
           <div className="grid grid-cols-2 gap-3">
             <MiniStat label="RSI 14" value={formatNumber(technical.rsi14, 1)} />
-            <MiniStat label="ADX 14" value={formatNumber(latest.adx14, 1)} />
+            <MiniStat label="ADX 14" value={formatNumber(visibleCandles[visibleCandles.length - 1]?.adx14 ?? latest.adx14, 1)} />
             <MiniStat label="MACD hist" value={formatNumber(technical.macd_histogram, 1)} />
-            <MiniStat label="Score" value={formatNumber(evaluation.signal.score, 3)} />
+            <MiniStat label="Score" value={formatNumber(modeEvaluation.signal.score, 3)} />
           </div>
           <div className="rounded-2xl bg-black/20 p-4 text-sm text-slate-300">
+            <MiniLine label={`${activeChart?.timeframe ?? activeTimeframe} signal`} value={modeEvaluation.signal?.signal ?? "-"} />
+            <MiniLine label="Trade filter" value={tradeFilter?.status ?? "-"} />
+            <MiniLine label="Backtest odds" value={probability ? `${formatProbability(probability.up_probability)} up / ${formatProbability(probability.down_probability)} down` : "-"} />
+            <MiniLine label="Expected R" value={probability ? `L ${formatNumber(probability.expected_long_r, 2)} / S ${formatNumber(probability.expected_short_r, 2)}` : "-"} />
+            <MiniLine label="ATR" value={formatPct(marketContext?.atr_percent)} />
+            <MiniLine label="Range position" value={formatPct(marketContext?.range_position_percent, 0)} />
             <MiniLine label="Live price" value={formatUsd(currentPrice)} />
             <MiniLine label="Support" value={formatUsd(priceRange?.support_level)} />
             <MiniLine label="Resistance" value={formatUsd(priceRange?.resistance_level)} />
@@ -271,7 +450,7 @@ function DecisionChart({ evaluation, chart }) {
       <div className="mt-4 grid gap-4 xl:grid-cols-4">
         <IndicatorPanel
           title="RSI"
-          candles={candles}
+          candles={visibleCandles}
           keys={["rsi14"]}
           domain={[0, 100]}
           guides={[30, 50, 70]}
@@ -280,7 +459,7 @@ function DecisionChart({ evaluation, chart }) {
         />
         <IndicatorPanel
           title="MACD"
-          candles={candles}
+          candles={visibleCandles}
           keys={["macd_histogram"]}
           domain="auto"
           colors={["#fbbf24"]}
@@ -289,7 +468,7 @@ function DecisionChart({ evaluation, chart }) {
         />
         <IndicatorPanel
           title="ADX"
-          candles={candles}
+          candles={visibleCandles}
           keys={["adx14"]}
           domain={[0, 60]}
           guides={[20, 25, 40]}
@@ -298,7 +477,7 @@ function DecisionChart({ evaluation, chart }) {
         />
         <IndicatorPanel
           title="Volume"
-          candles={candles}
+          candles={visibleCandles}
           keys={["volume"]}
           domain={[0, Math.max(...candles.map((candle) => candle.volume ?? 0), 1)]}
           colors={["#94a3b8"]}
@@ -310,36 +489,78 @@ function DecisionChart({ evaluation, chart }) {
   );
 }
 
-function PriceDecisionSvg({ candles, currentPrice, priceRange, decision, scenarioForecast }) {
+function TradeModeSelector({ options, activeTimeframe, modes, onSelect }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {options.map((option) => {
+        const available = modes?.[option.timeframe]?.available !== false;
+        const active = activeTimeframe === option.timeframe;
+        return (
+          <button
+            key={option.timeframe}
+            type="button"
+            onClick={() => onSelect(option.timeframe)}
+            className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${
+              active
+                ? "border-emerald-300/60 bg-emerald-300/15 text-emerald-100"
+                : "border-white/10 bg-white/5 text-slate-300 hover:border-emerald-300/40"
+            } ${available ? "" : "opacity-60"}`}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function PriceDecisionSvg({
+  candles,
+  allCandles,
+  visibleStartIndex,
+  visibleCount,
+  onPan,
+  currentPrice,
+  priceRange,
+  decision,
+  scenarioForecast,
+  paperSetup,
+  overlays
+}) {
+  const [hoverIndex, setHoverIndex] = useState(null);
+  const [dragStart, setDragStart] = useState(null);
   const width = 980;
-  const height = 410;
-  const margin = { top: 18, right: 78, bottom: 34, left: 68 };
+  const height = overlays.ribbon ? 446 : 410;
+  const margin = { top: 18, right: 78, bottom: overlays.ribbon ? 70 : 34, left: 68 };
   const innerWidth = width - margin.left - margin.right;
   const innerHeight = height - margin.top - margin.bottom;
   const scenarioMedian = (scenarioForecast?.median_path ?? []).filter((point) => isFiniteNumber(point.price));
   const scenarioLower = (scenarioForecast?.lower_band_path ?? []).filter((point) => isFiniteNumber(point.price));
   const scenarioUpper = (scenarioForecast?.upper_band_path ?? []).filter((point) => isFiniteNumber(point.price));
-  const scenarioPointCount = Math.max(scenarioMedian.length, scenarioLower.length, scenarioUpper.length);
+  const scenarioPointCount = overlays.scenario ? Math.max(scenarioMedian.length, scenarioLower.length, scenarioUpper.length) : 0;
   const priceValues = candles.flatMap((candle) => [
     candle.high,
     candle.low,
-    candle.ema20,
-    candle.ema50,
-    candle.vwap,
-    candle.bollinger_high,
-    candle.bollinger_low
+    overlays.ema ? candle.ema20 : null,
+    overlays.ema ? candle.ema50 : null,
+    overlays.vwap ? candle.vwap : null,
+    overlays.bollinger ? candle.bollinger_high : null,
+    overlays.bollinger ? candle.bollinger_low : null
   ]);
   priceValues.push(
     currentPrice,
-    priceRange?.expected_low,
-    priceRange?.expected_high,
-    priceRange?.support_level,
-    priceRange?.resistance_level,
-    scenarioForecast?.expected_low,
-    scenarioForecast?.expected_high,
-    ...scenarioMedian.map((point) => point.price),
-    ...scenarioLower.map((point) => point.price),
-    ...scenarioUpper.map((point) => point.price)
+    overlays.levels ? priceRange?.expected_low : null,
+    overlays.levels ? priceRange?.expected_high : null,
+    overlays.levels ? priceRange?.support_level : null,
+    overlays.levels ? priceRange?.resistance_level : null,
+    overlays.scenario ? scenarioForecast?.expected_low : null,
+    overlays.scenario ? scenarioForecast?.expected_high : null,
+    overlays.setup ? paperSetup?.entry_price : null,
+    overlays.setup ? paperSetup?.stop_loss : null,
+    overlays.setup ? paperSetup?.take_profit : null,
+    ...(overlays.scenario ? scenarioMedian.map((point) => point.price) : []),
+    ...(overlays.scenario ? scenarioLower.map((point) => point.price) : []),
+    ...(overlays.scenario ? scenarioUpper.map((point) => point.price) : [])
   );
   const [minPrice, maxPrice] = paddedDomain(priceValues, 0.08);
   const totalLastIndex = Math.max(candles.length - 1 + scenarioPointCount, candles.length - 1, 1);
@@ -351,16 +572,16 @@ function PriceDecisionSvg({ candles, currentPrice, priceRange, decision, scenari
     ["ema20", "#6ee7b7"],
     ["ema50", "#67e8f9"],
     ["vwap", "#fde68a"]
-  ];
-  const bollingerTop = seriesPath(candles, "bollinger_high", xFor, yFor);
-  const bollingerBottom = seriesPath([...candles].reverse(), "bollinger_low", (index) => xFor(candles.length - 1 - index), yFor);
+  ].filter(([key]) => (key === "vwap" ? overlays.vwap : overlays.ema));
+  const bollingerTop = overlays.bollinger ? seriesPath(candles, "bollinger_high", xFor, yFor) : "";
+  const bollingerBottom = overlays.bollinger ? seriesPath([...candles].reverse(), "bollinger_low", (index) => xFor(candles.length - 1 - index), yFor) : "";
   const bandPath = bollingerTop && bollingerBottom ? `${bollingerTop} L ${bollingerBottom.slice(2)} Z` : "";
   const latestX = xFor(candles.length - 1);
   const markerY = yFor(currentPrice);
   const markerColor = decision.side === "LONG" ? "#34d399" : decision.side === "SHORT" ? "#fb7185" : "#67e8f9";
-  const scenarioMedianPoints = scenarioMedian.length ? [{ price: currentPrice }, ...scenarioMedian] : [];
-  const scenarioLowerPoints = scenarioLower.length ? [{ price: currentPrice }, ...scenarioLower] : [];
-  const scenarioUpperPoints = scenarioUpper.length ? [{ price: currentPrice }, ...scenarioUpper] : [];
+  const scenarioMedianPoints = overlays.scenario && scenarioMedian.length ? [{ price: currentPrice }, ...scenarioMedian] : [];
+  const scenarioLowerPoints = overlays.scenario && scenarioLower.length ? [{ price: currentPrice }, ...scenarioLower] : [];
+  const scenarioUpperPoints = overlays.scenario && scenarioUpper.length ? [{ price: currentPrice }, ...scenarioUpper] : [];
   const scenarioUpperPath = pathFromPoints(scenarioUpperPoints, scenarioXFor, yFor);
   const scenarioLowerPath = pathFromPoints(
     [...scenarioLowerPoints].reverse(),
@@ -374,16 +595,92 @@ function PriceDecisionSvg({ candles, currentPrice, priceRange, decision, scenari
   const scenarioLabelY = scenarioLabelPoint
     ? Math.max(22, Math.min(height - 54, yFor(scenarioLabelPoint.price) - 10))
     : 0;
+  const hoverCandle = hoverIndex === null ? null : candles[hoverIndex];
+  const hoverX = hoverIndex === null ? null : xFor(hoverIndex);
+  const trendRibbonY = height - 48;
+  const trendRibbonHeight = 13;
+  const candleStep = candles.length <= 1 ? innerWidth : innerWidth / (candles.length - 1);
+  const longZoneTop = isFiniteNumber(priceRange?.support_level)
+    ? yFor(priceRange.support_level * 1.006)
+    : null;
+  const longZoneBottom = isFiniteNumber(priceRange?.support_level)
+    ? yFor(priceRange.support_level * 0.994)
+    : null;
+  const shortZoneTop = isFiniteNumber(priceRange?.resistance_level)
+    ? yFor(priceRange.resistance_level * 1.006)
+    : null;
+  const shortZoneBottom = isFiniteNumber(priceRange?.resistance_level)
+    ? yFor(priceRange.resistance_level * 0.994)
+    : null;
+
+  function pointerToIndex(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * width;
+    const ratio = Math.max(0, Math.min(1, (x - margin.left) / innerWidth));
+    return Math.max(0, Math.min(candles.length - 1, Math.round(ratio * Math.max(1, candles.length - 1))));
+  }
+
+  function handlePointerMove(event) {
+    const nextIndex = pointerToIndex(event);
+    setHoverIndex(nextIndex);
+    if (dragStart) {
+      const delta = nextIndex - dragStart.index;
+      const threshold = Math.max(2, Math.floor(visibleCount / 24));
+      if (Math.abs(delta) >= threshold) {
+        onPan(-delta);
+        setDragStart({ index: nextIndex });
+      }
+    }
+  }
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="h-auto w-full overflow-visible" role="img" aria-label="Bitcoin long short decision chart">
+    <svg
+      viewBox={`0 0 ${width} ${height}`}
+      className="h-auto w-full cursor-crosshair select-none overflow-visible"
+      role="img"
+      aria-label="Bitcoin long short decision chart"
+      onPointerDown={(event) => {
+        event.currentTarget.setPointerCapture(event.pointerId);
+        setDragStart({ index: pointerToIndex(event) });
+      }}
+      onPointerMove={handlePointerMove}
+      onPointerUp={(event) => {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+        setDragStart(null);
+      }}
+      onPointerLeave={() => {
+        setHoverIndex(null);
+        setDragStart(null);
+      }}
+    >
       <rect x="0" y="0" width={width} height={height} rx="18" fill="rgba(2,6,23,0.42)" />
       {[0.25, 0.5, 0.75].map((tick) => {
         const y = margin.top + tick * innerHeight;
         return <line key={tick} x1={margin.left} x2={width - margin.right} y1={y} y2={y} stroke="rgba(148,163,184,0.16)" />;
       })}
 
-      {isFiniteNumber(priceRange?.expected_low) && isFiniteNumber(priceRange?.expected_high) ? (
+      {overlays.zones && longZoneTop !== null && longZoneBottom !== null ? (
+        <rect
+          x={margin.left}
+          y={Math.min(longZoneTop, longZoneBottom)}
+          width={innerWidth}
+          height={Math.max(2, Math.abs(longZoneBottom - longZoneTop))}
+          fill="rgba(52,211,153,0.08)"
+          stroke="rgba(52,211,153,0.18)"
+        />
+      ) : null}
+      {overlays.zones && shortZoneTop !== null && shortZoneBottom !== null ? (
+        <rect
+          x={margin.left}
+          y={Math.min(shortZoneTop, shortZoneBottom)}
+          width={innerWidth}
+          height={Math.max(2, Math.abs(shortZoneBottom - shortZoneTop))}
+          fill="rgba(251,113,133,0.08)"
+          stroke="rgba(251,113,133,0.18)"
+        />
+      ) : null}
+
+      {overlays.levels && isFiniteNumber(priceRange?.expected_low) && isFiniteNumber(priceRange?.expected_high) ? (
         <rect
           x={margin.left}
           y={yFor(priceRange.expected_high)}
@@ -440,7 +737,40 @@ function PriceDecisionSvg({ candles, currentPrice, priceRange, decision, scenari
         </g>
       ) : null}
 
-      {[
+      {overlays.setup && paperSetup ? (
+        <g>
+          {[
+            ["Entry", paperSetup.entry_price, "rgba(34,211,238,0.82)"],
+            ["Stop", paperSetup.stop_loss, "rgba(251,113,133,0.82)"],
+            ["Take profit", paperSetup.take_profit, "rgba(52,211,153,0.82)"]
+          ].map(([label, value, color]) => isFiniteNumber(value) ? (
+            <g key={label}>
+              <line x1={margin.left} x2={width - margin.right} y1={yFor(value)} y2={yFor(value)} stroke={color} strokeWidth="1.5" strokeDasharray={label === "Entry" ? "none" : "8 5"} />
+              <text x={margin.left + 8} y={yFor(value) - 5} fill={color} fontSize="11" fontWeight="700">{label}</text>
+            </g>
+          ) : null)}
+          {isFiniteNumber(paperSetup.entry_price) && isFiniteNumber(paperSetup.stop_loss) && isFiniteNumber(paperSetup.take_profit) ? (
+            <>
+              <rect
+                x={latestX + 8}
+                y={Math.min(yFor(paperSetup.entry_price), yFor(paperSetup.take_profit))}
+                width={46}
+                height={Math.abs(yFor(paperSetup.entry_price) - yFor(paperSetup.take_profit))}
+                fill="rgba(52,211,153,0.12)"
+              />
+              <rect
+                x={latestX + 8}
+                y={Math.min(yFor(paperSetup.entry_price), yFor(paperSetup.stop_loss))}
+                width={46}
+                height={Math.abs(yFor(paperSetup.entry_price) - yFor(paperSetup.stop_loss))}
+                fill="rgba(251,113,133,0.12)"
+              />
+            </>
+          ) : null}
+        </g>
+      ) : null}
+
+      {overlays.levels ? [
         ["Support", priceRange?.support_level, "rgba(226,232,240,0.55)"],
         ["Resistance", priceRange?.resistance_level, "rgba(226,232,240,0.55)"],
         ["Expected low", priceRange?.expected_low, "rgba(34,211,238,0.45)"],
@@ -450,11 +780,67 @@ function PriceDecisionSvg({ candles, currentPrice, priceRange, decision, scenari
           <line x1={margin.left} x2={width - margin.right} y1={yFor(value)} y2={yFor(value)} stroke={color} strokeDasharray="6 6" />
           <text x={width - margin.right + 8} y={yFor(value) + 4} fill="rgb(203,213,225)" fontSize="11">{label}</text>
         </g>
-      ) : null)}
+      ) : null) : null}
 
       <line x1={margin.left} x2={width - margin.right} y1={markerY} y2={markerY} stroke={markerColor} strokeOpacity="0.65" />
       <DecisionMarker x={latestX} y={markerY} side={decision.side} color={markerColor} />
       <text x={latestX - 28} y={Math.max(18, markerY - 18)} fill={markerColor} fontSize="14" fontWeight="700">{decision.bias}</text>
+
+      {overlays.ribbon ? (
+        <g>
+          <text x={margin.left} y={trendRibbonY - 8} fill="rgb(148,163,184)" fontSize="11">Trend</text>
+          {candles.map((candle, index) => {
+            const trend = trendState(candle);
+            const fill = trend === "up" ? "rgba(52,211,153,0.78)" : trend === "down" ? "rgba(251,113,133,0.72)" : "rgba(103,232,249,0.45)";
+            return (
+              <rect
+                key={`${candle.time}-trend`}
+                x={xFor(index) - candleStep / 2}
+                y={trendRibbonY}
+                width={Math.max(2, candleStep)}
+                height={trendRibbonHeight}
+                fill={fill}
+              />
+            );
+          })}
+        </g>
+      ) : null}
+
+      {hoverCandle && hoverX !== null ? (
+        <g pointerEvents="none">
+          <line x1={hoverX} x2={hoverX} y1={margin.top} y2={height - margin.bottom} stroke="rgba(226,232,240,0.35)" strokeDasharray="4 6" />
+          <circle cx={hoverX} cy={yFor(hoverCandle.close)} r="4" fill="rgb(226,232,240)" />
+          <rect
+            x={hoverX > width * 0.64 ? margin.left + 12 : hoverX + 14}
+            y={margin.top + 10}
+            width="216"
+            height="150"
+            rx="12"
+            fill="rgba(15,23,42,0.94)"
+            stroke="rgba(148,163,184,0.28)"
+          />
+          {[
+            formatShortDate(hoverCandle.time),
+            `O ${formatUsd(hoverCandle.open)} H ${formatUsd(hoverCandle.high)}`,
+            `L ${formatUsd(hoverCandle.low)} C ${formatUsd(hoverCandle.close)}`,
+            `Vol ${formatCompact(hoverCandle.volume)}`,
+            `RSI ${formatNumber(hoverCandle.rsi14, 1)}  MACD ${formatNumber(hoverCandle.macd_histogram, 1)}`,
+            `EMA ${formatUsd(hoverCandle.ema20)} / ${formatUsd(hoverCandle.ema50)}`,
+            `ADX ${formatNumber(hoverCandle.adx14, 1)}  ${trendLabel(hoverCandle)}`
+          ].map((line, index) => (
+            <text
+              key={line}
+              x={(hoverX > width * 0.64 ? margin.left + 28 : hoverX + 30)}
+              y={margin.top + 34 + index * 18}
+              fill={index === 0 ? "rgb(226,232,240)" : "rgb(203,213,225)"}
+              fontSize={index === 0 ? "12" : "11"}
+              fontWeight={index === 0 ? "700" : "500"}
+            >
+              {line}
+            </text>
+          ))}
+        </g>
+      ) : null}
 
       {[minPrice, (minPrice + maxPrice) / 2, maxPrice].map((value) => (
         <text key={value} x={width - margin.right + 8} y={yFor(value) + 4} fill="rgb(148,163,184)" fontSize="11">
@@ -467,11 +853,14 @@ function PriceDecisionSvg({ candles, currentPrice, priceRange, decision, scenari
       <text x={Math.max(margin.left + 82, latestX - 42)} y={height - 12} fill="rgb(148,163,184)" fontSize="11">
         {formatShortDate(candles[candles.length - 1]?.time)}
       </text>
-      {scenarioMedian.length ? (
+      {overlays.scenario && scenarioMedian.length ? (
         <text x={width - margin.right - 92} y={height - 12} fill="rgb(148,163,184)" fontSize="11">
           {formatShortDate(scenarioMedian[scenarioMedian.length - 1]?.time)}
         </text>
       ) : null}
+      <text x={margin.left + innerWidth / 2 - 60} y={height - 12} fill="rgb(100,116,139)" fontSize="10">
+        {visibleStartIndex + 1}-{visibleStartIndex + candles.length} / {allCandles.length}
+      </text>
     </svg>
   );
 }
@@ -810,6 +1199,328 @@ function PaperSetupCard({ paperSetup, futures }) {
   );
 }
 
+function ScannerPanel({ scanner }) {
+  const candidates = scanner?.candidates ?? [];
+  const active = candidates.filter((candidate) => candidate.action === "GO LONG" || candidate.action === "GO SHORT");
+  const rows = candidates;
+
+  return (
+    <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
+      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+        <div>
+          <h2 className="text-xl font-semibold">Long / Short Scanner</h2>
+          <p className="text-sm text-slate-400">
+            {scanner
+              ? `${active.length} active setups from ${candidates.length} symbols ranked by the same closed-candle signal model.`
+              : "Set BOT_SYMBOLS to scan a comma-separated futures universe."}
+          </p>
+        </div>
+        <span className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-sm text-cyan-100">
+          signal only
+        </span>
+      </div>
+
+      {rows.length ? (
+        <div className="mt-5 overflow-x-auto">
+          <table className="min-w-full text-left text-sm">
+            <thead className="border-b border-white/10 text-xs uppercase tracking-[0.16em] text-slate-500">
+              <tr>
+                <th className="py-3 pr-4">Symbol</th>
+                <th className="py-3 pr-4">Action</th>
+                <th className="py-3 pr-4 text-right">Confidence</th>
+                <th className="py-3 pr-4 text-right">Score</th>
+                <th className="py-3 pr-4 text-right">24h</th>
+                <th className="py-3 pr-4">Regime</th>
+                <th className="py-3">Reason</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/10">
+              {rows.slice(0, 12).map((candidate) => (
+                <tr key={candidate.symbol} className="align-top">
+                  <td className="py-3 pr-4 font-semibold text-slate-100">{candidate.symbol}</td>
+                  <td className="py-3 pr-4">
+                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${scannerActionClass(candidate.action)}`}>
+                      {candidate.action}
+                    </span>
+                  </td>
+                  <td className="py-3 pr-4 text-right text-slate-200">{formatProbability(candidate.confidence)}</td>
+                  <td className={`py-3 pr-4 text-right font-medium ${candidate.score > 0.15 ? "text-emerald-300" : candidate.score < -0.15 ? "text-rose-300" : "text-cyan-200"}`}>
+                    {formatSignedNumber(candidate.score, 3)}
+                  </td>
+                  <td className={`py-3 pr-4 text-right ${candidate.change_24h >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
+                    {formatPct(candidate.change_24h)}
+                  </td>
+                  <td className="py-3 pr-4 text-slate-300">
+                    <p>{candidate.market_regime ?? "-"}</p>
+                    <p className="text-xs text-slate-500">{candidate.volatility_regime ?? ""}</p>
+                  </td>
+                  <td className="max-w-xl py-3 text-slate-400">{candidate.error ?? candidate.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="mt-5 rounded-2xl bg-black/20 p-4 text-sm text-slate-400">
+          No scanner symbols are configured.
+        </p>
+      )}
+
+      {scanner?.errors?.length ? (
+        <p className="mt-4 rounded-2xl bg-amber-300/10 p-3 text-sm text-amber-100">
+          {scanner.errors.slice(0, 2).join(" | ")}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function ConfidencePanel({ confidence }) {
+  const factors = confidence?.factors ?? [];
+  return (
+    <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
+      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+        <div>
+          <h2 className="text-xl font-semibold">Confidence Score</h2>
+          <p className="text-sm text-slate-400">
+            Combined confirmation score for the current paper action.
+          </p>
+        </div>
+        <span className={`rounded-full border px-3 py-1 text-sm ${confidenceBadgeClass(confidence)}`}>
+          {confidence?.label ?? "WAITING"}
+        </span>
+      </div>
+
+      <div className="mt-5 grid gap-4 md:grid-cols-[12rem_1fr]">
+        <div className="rounded-2xl bg-black/20 p-5 text-center">
+          <p className={`text-4xl font-semibold ${confidenceTextClass(confidence)}`}>
+            {formatNumber(confidence?.percent, 1)}%
+          </p>
+          <p className="mt-2 text-sm text-slate-400">{confidence?.action ?? "STAY FLAT"}</p>
+        </div>
+        <div className="rounded-2xl bg-black/20 p-4">
+          <p className="text-sm text-slate-300">
+            {confidence?.summary ?? "Waiting for signal, probability, filter, and market context."}
+          </p>
+          <div className="mt-4 space-y-3">
+            {factors.length ? factors.map((factor) => (
+              <ConfidenceBar key={factor.label} factor={factor} />
+            )) : (
+              <p className="rounded-xl bg-white/5 p-3 text-sm text-slate-400">No confidence factors yet.</p>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ConfidenceBar({ factor }) {
+  const percent = Math.max(0, Math.min(100, Number(factor.percent ?? 0)));
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-3 text-sm">
+        <span className="text-slate-300">{factor.label}</span>
+        <span className="font-medium text-slate-100">{formatNumber(percent, 1)}%</span>
+      </div>
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-white/10">
+        <div
+          className={`h-full rounded-full ${percent >= 75 ? "bg-emerald-300" : percent >= 50 ? "bg-cyan-300" : "bg-amber-300"}`}
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function SimulatorPanel({ simulator }) {
+  const overall = simulator?.overall;
+  const rows = (simulator?.results ?? [])
+    .filter((row) => !row.error)
+    .sort((a, b) => Number(b.stats?.net_expected_r ?? -99) - Number(a.stats?.net_expected_r ?? -99));
+  const errors = (simulator?.results ?? []).filter((row) => row.error);
+
+  return (
+    <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
+      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+        <div>
+          <h2 className="text-xl font-semibold">Futures Simulator</h2>
+          <p className="text-sm text-slate-400">
+            {simulator?.status === "ok"
+              ? `${simulator.exchange} candle replay from local history - last run ${formatTime(simulator.generated_at)}.`
+              : simulator?.message ?? "Set BOT_HISTORY_DB_PATH and sync candles to enable simulator stats."}
+          </p>
+        </div>
+        <span className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-sm text-cyan-100">
+          offline replay
+        </span>
+      </div>
+
+      {simulator?.status === "ok" ? (
+        <>
+          <div className="mt-5 grid gap-3 md:grid-cols-4">
+            <MiniStat label="Trades" value={overall?.total_trades ?? 0} />
+            <MiniStat label="Win rate" value={formatProbability(overall?.win_rate)} />
+            <MiniStat label="Net expected R" value={formatSignedNumber(overall?.net_expected_r, 2)} />
+            <MiniStat label="Max drawdown" value={formatPct(overall?.max_drawdown_percent)} />
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-4">
+            <MiniStat label="Net PnL" value={formatUsd(overall?.total_net_pnl)} />
+            <MiniStat label="Fees" value={formatUsd(overall?.total_fees)} />
+            <MiniStat label="Funding" value={formatUsd(overall?.total_funding)} />
+            <MiniStat label="Liq touches" value={overall?.liquidation_touch_count ?? 0} />
+          </div>
+
+          <div className="mt-5 grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+            <SimulatorEquityChart points={simulator.equity_curve ?? []} />
+            <SimulatorSymbolBars rows={rows} />
+          </div>
+
+          <div className="mt-5 overflow-x-auto">
+            <table className="min-w-full text-left text-sm">
+              <thead className="border-b border-white/10 text-xs uppercase tracking-[0.16em] text-slate-500">
+                <tr>
+                  <th className="py-3 pr-4">Symbol</th>
+                  <th className="py-3 pr-4 text-right">Trades</th>
+                  <th className="py-3 pr-4 text-right">Win</th>
+                  <th className="py-3 pr-4 text-right">Net R</th>
+                  <th className="py-3 pr-4 text-right">PnL</th>
+                  <th className="py-3 pr-4 text-right">Max DD</th>
+                  <th className="py-3">Recent</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/10">
+                {rows.slice(0, 8).map((row) => (
+                  <tr key={row.symbol} className="align-top">
+                    <td className="py-3 pr-4 font-semibold text-slate-100">{row.symbol}</td>
+                    <td className="py-3 pr-4 text-right text-slate-300">{row.stats?.total_trades ?? 0}</td>
+                    <td className="py-3 pr-4 text-right text-slate-300">{formatProbability(row.stats?.win_rate)}</td>
+                    <td className={`py-3 pr-4 text-right font-medium ${Number(row.stats?.net_expected_r ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
+                      {formatSignedNumber(row.stats?.net_expected_r, 2)}
+                    </td>
+                    <td className={`py-3 pr-4 text-right ${Number(row.stats?.total_net_pnl ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
+                      {formatUsd(row.stats?.total_net_pnl)}
+                    </td>
+                    <td className="py-3 pr-4 text-right text-slate-300">{formatPct(row.stats?.max_drawdown_percent)}</td>
+                    <td className="py-3 text-slate-400">
+                      {(row.recent_trades ?? []).length
+                        ? row.recent_trades.map((trade) => `${trade.side} ${trade.outcome} ${formatSignedNumber(trade.net_r, 2)}R`).join(" | ")
+                        : "No completed replay trades"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {errors.length ? (
+            <p className="mt-4 rounded-2xl bg-amber-300/10 p-3 text-sm text-amber-100">
+              Missing history: {errors.slice(0, 4).map((row) => row.symbol).join(", ")}
+            </p>
+          ) : null}
+        </>
+      ) : (
+        <p className="mt-5 rounded-2xl bg-black/20 p-4 text-sm text-slate-400">
+          {simulator?.message ?? "Simulator data is not available yet."}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function SimulatorEquityChart({ points }) {
+  const chartPoints = (points ?? []).filter((point) => isFiniteNumber(point.equity));
+  const width = 720;
+  const height = 240;
+  const margin = { top: 18, right: 26, bottom: 34, left: 64 };
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = height - margin.top - margin.bottom;
+  const equities = chartPoints.map((point) => Number(point.equity));
+  const [minEquity, maxEquity] = paddedDomain(equities, 0.12);
+  const xFor = (index) => margin.left + (innerWidth * index) / Math.max(1, chartPoints.length - 1);
+  const yFor = (value) => margin.top + ((maxEquity - value) / Math.max(1, maxEquity - minEquity)) * innerHeight;
+  const path = chartPoints
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(index).toFixed(2)} ${yFor(Number(point.equity)).toFixed(2)}`)
+    .join(" ");
+  const latest = chartPoints[chartPoints.length - 1];
+  const first = chartPoints[0];
+  const delta = latest && first ? Number(latest.equity) - Number(first.equity) : null;
+
+  return (
+    <div className="rounded-2xl bg-black/20 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-medium text-slate-200">Equity replay</p>
+          <p className="text-xs text-slate-500">Closed simulated contracts over local candle history.</p>
+        </div>
+        <span className={`text-sm font-semibold ${Number(delta ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
+          {formatUsd(delta)}
+        </span>
+      </div>
+      {chartPoints.length > 1 ? (
+        <svg viewBox={`0 0 ${width} ${height}`} className="mt-4 h-64 w-full overflow-visible">
+          <line x1={margin.left} x2={width - margin.right} y1={yFor(first.equity)} y2={yFor(first.equity)} stroke="rgba(148,163,184,0.22)" strokeDasharray="5 5" />
+          <path d={path} fill="none" stroke={Number(delta ?? 0) >= 0 ? "#6ee7b7" : "#fda4af"} strokeWidth="3" strokeLinecap="round" />
+          {chartPoints.map((point, index) => {
+            if (index === 0) return null;
+            const positive = Number(point.net_pnl ?? 0) >= 0;
+            return (
+              <circle
+                key={`${point.time ?? index}-${index}`}
+                cx={xFor(index)}
+                cy={yFor(Number(point.equity))}
+                r="4"
+                className={positive ? "fill-emerald-300" : "fill-rose-300"}
+              />
+            );
+          })}
+          <text x={margin.left} y={height - 10} className="fill-slate-500 text-[11px]">start</text>
+          <text x={width - margin.right - 48} y={height - 10} className="fill-slate-500 text-[11px]">latest</text>
+          <text x={8} y={yFor(maxEquity) + 4} className="fill-slate-500 text-[11px]">{formatUsd(maxEquity)}</text>
+          <text x={8} y={yFor(minEquity) + 4} className="fill-slate-500 text-[11px]">{formatUsd(minEquity)}</text>
+        </svg>
+      ) : (
+        <p className="mt-4 rounded-xl bg-white/5 p-4 text-sm text-slate-400">No closed replay trades yet.</p>
+      )}
+    </div>
+  );
+}
+
+function SimulatorSymbolBars({ rows }) {
+  const ranked = rows.slice(0, 8);
+  const maxAbs = Math.max(
+    1,
+    ...ranked.map((row) => Math.abs(Number(row.stats?.total_net_pnl ?? 0)))
+  );
+  return (
+    <div className="rounded-2xl bg-black/20 p-4">
+      <p className="text-sm font-medium text-slate-200">Symbol performance</p>
+      <div className="mt-4 space-y-3">
+        {ranked.length ? ranked.map((row) => {
+          const pnl = Number(row.stats?.total_net_pnl ?? 0);
+          const width = Math.max(4, Math.abs(pnl) / maxAbs * 100);
+          return (
+            <div key={row.symbol}>
+              <div className="mb-1 flex items-center justify-between gap-3 text-xs">
+                <span className="font-medium text-slate-300">{row.symbol}</span>
+                <span className={pnl >= 0 ? "text-emerald-300" : "text-rose-300"}>{formatUsd(pnl)}</span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-white/10">
+                <div
+                  className={`h-full rounded-full ${pnl >= 0 ? "bg-emerald-300" : "bg-rose-300"}`}
+                  style={{ width: `${width}%` }}
+                />
+              </div>
+            </div>
+          );
+        }) : (
+          <p className="rounded-xl bg-white/5 p-3 text-sm text-slate-400">No symbols with replay data yet.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TradeFilterCard({ tradeFilter }) {
   const status = tradeFilter?.status ?? "WAITING";
   const reasons = tradeFilter?.reasons?.length ? tradeFilter.reasons : ["Risk gates not evaluated yet."];
@@ -839,8 +1550,10 @@ function TradeFilterCard({ tradeFilter }) {
 
 function PaperJournalPanel({ report }) {
   const overall = report?.overall;
+  const ledger = report?.ledger;
   const sideGroups = report?.groups?.side ?? {};
   const volatilityGroups = report?.groups?.volatility_regime ?? {};
+  const recentTrades = report?.recent_trades ?? [];
   const sideRows = Object.entries(sideGroups).slice(0, 4);
   const volatilityRows = Object.entries(volatilityGroups).slice(0, 4);
 
@@ -865,9 +1578,18 @@ function PaperJournalPanel({ report }) {
         <MiniStat label="Expected R" value={formatSignedNumber(overall?.expected_r, 2)} />
       </div>
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-2">
+      <div className="mt-5 grid gap-3 md:grid-cols-5">
+        <MiniStat label="Closed trades" value={ledger?.closed_trades ?? 0} />
+        <MiniStat label="Net PnL" value={formatUsd(ledger?.net_pnl)} />
+        <MiniStat label="Fees / slip" value={`${formatUsd(ledger?.fees)} / ${formatUsd(ledger?.slippage)}`} />
+        <MiniStat label="Funding" value={formatUsd(ledger?.funding)} />
+        <MiniStat label="Max drawdown" value={formatPct(ledger?.max_drawdown_percent)} />
+      </div>
+
+      <div className="mt-5 grid gap-4 lg:grid-cols-3">
         <JournalGroup title="By side" rows={sideRows} />
         <JournalGroup title="By volatility" rows={volatilityRows} />
+        <RecentLedgerTrades rows={recentTrades} />
       </div>
     </section>
   );
@@ -898,7 +1620,34 @@ function JournalGroup({ title, rows }) {
   );
 }
 
-function NewsPanel({ headlines, sources }) {
+function RecentLedgerTrades({ rows }) {
+  return (
+    <div className="rounded-2xl bg-black/20 p-4">
+      <p className="text-sm font-medium text-slate-200">Recent net trades</p>
+      <div className="mt-4 space-y-3">
+        {rows.length ? rows.slice(-5).reverse().map((trade, index) => (
+          <div key={`${trade.entry_time}-${trade.side}-${index}`} className="rounded-xl bg-white/5 p-3 text-sm text-slate-300">
+            <div className="flex items-center justify-between gap-3">
+              <span className="font-medium text-slate-100">{trade.side} {trade.outcome}</span>
+              <span className={Number(trade.net_pnl) >= 0 ? "text-emerald-300" : "text-rose-300"}>{formatUsd(trade.net_pnl)}</span>
+            </div>
+            <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+              <MiniLine label="Net R" value={formatSignedNumber(trade.net_r, 2)} />
+              <MiniLine label="Costs" value={formatUsd(Number(trade.fees ?? 0) + Number(trade.slippage ?? 0))} />
+              <MiniLine label="Exit" value={formatUsd(trade.exit_price)} />
+            </div>
+          </div>
+        )) : (
+          <p className="rounded-xl bg-white/5 p-3 text-sm text-slate-400">No closed paper trades yet.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function NewsPanel({ headlines, sources, events, macro }) {
+  const macroEvents = macro?.events ?? [];
+  const calendar = macro?.calendar;
   return (
     <section className="rounded-3xl border border-white/10 bg-panel/80 p-6 shadow-glow">
       <h2 className="text-xl font-semibold">Market Mood</h2>
@@ -919,6 +1668,10 @@ function NewsPanel({ headlines, sources }) {
           <p className="rounded-2xl bg-black/20 p-4 text-sm text-slate-400 md:col-span-3">Waiting for market mood sources.</p>
         )}
       </div>
+      <div className="mt-5 grid gap-3 lg:grid-cols-2">
+        <EventBuckets title="News event buckets" events={events} />
+        <CalendarRiskCard calendar={calendar} macroEvents={macroEvents} />
+      </div>
       <div className="mt-5 space-y-3">
         {headlines.length ? (
           headlines.map((headline) => (
@@ -930,11 +1683,13 @@ function NewsPanel({ headlines, sources }) {
               className="block rounded-2xl border border-white/10 bg-black/20 p-4 transition hover:border-cyan-300/50 hover:bg-cyan-300/10"
             >
               <div className="flex items-center justify-between gap-3 text-xs text-slate-400">
-                <span>{headline.source} - {headline.category}</span>
+                <span>{headline.source} - {headline.category} - {headline.event_type ?? "general"}</span>
                 <span>{formatTime(headline.published_at)}</span>
               </div>
               <p className="mt-2 text-sm font-medium text-slate-100">{headline.title}</p>
-              <p className="mt-2 text-xs text-slate-400">Sentiment {formatNumber(headline.sentiment, 3)}</p>
+              <p className="mt-2 text-xs text-slate-400">
+                Sentiment {formatNumber(headline.sentiment, 3)} - {headline.event_impact ?? "LOW"} impact - {headline.event_direction ?? "NEUTRAL"}
+              </p>
             </a>
           ))
         ) : (
@@ -942,6 +1697,62 @@ function NewsPanel({ headlines, sources }) {
         )}
       </div>
     </section>
+  );
+}
+
+function EventBuckets({ title, events }) {
+  return (
+    <div className="rounded-2xl bg-black/20 p-4">
+      <p className="text-sm font-medium text-slate-200">{title}</p>
+      <div className="mt-4 space-y-3">
+        {events.length ? events.slice(0, 5).map((event) => (
+          <div key={event.event_type} className="rounded-xl bg-white/5 p-3 text-sm text-slate-300">
+            <div className="flex items-center justify-between gap-3">
+              <span className="font-medium text-slate-100">{event.event_type}</span>
+              <span>{event.count} headlines</span>
+            </div>
+            <p className="mt-1 text-xs text-slate-400">
+              {event.impact} - {event.direction} - avg {formatSignedNumber(event.average_sentiment, 2)}
+            </p>
+          </div>
+        )) : (
+          <p className="rounded-xl bg-white/5 p-3 text-sm text-slate-400">No structured event buckets yet.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CalendarRiskCard({ calendar, macroEvents }) {
+  const active = calendar?.active_events ?? [];
+  const upcoming = calendar?.upcoming_events ?? [];
+  const rows = [...active, ...upcoming].slice(0, 5);
+  return (
+    <div className="rounded-2xl bg-black/20 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm font-medium text-slate-200">Economic calendar</p>
+        <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
+          {calendar?.status ?? "WAITING"}
+        </span>
+      </div>
+      <p className="mt-2 text-sm text-slate-400">{calendar?.reason ?? "Waiting for calendar context."}</p>
+      <div className="mt-4 space-y-2">
+        {rows.length ? rows.map((event) => (
+          <MiniLine
+            key={`${event.name}-${event.scheduled_at}`}
+            label={event.name}
+            value={`${formatShortDate(event.scheduled_at)} - ${event.impact}`}
+          />
+        )) : (
+          <p className="rounded-xl bg-white/5 p-3 text-sm text-slate-400">No scheduled high-impact events in the lookahead window.</p>
+        )}
+      </div>
+      {macroEvents.length ? (
+        <p className="mt-3 text-xs text-slate-500">
+          Macro headline buckets: {macroEvents.slice(0, 3).map((event) => event.event_type).join(", ")}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -1080,11 +1891,68 @@ function buildDecision(evaluation) {
   };
 }
 
+function timeframeHoursFor(timeframe) {
+  const match = String(timeframe ?? "4h").trim().toLowerCase().match(/^(\d+(?:\.\d+)?)([mhd])$/);
+  if (!match) return 4;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return 4;
+  if (match[2] === "m") return value / 60;
+  if (match[2] === "h") return value;
+  if (match[2] === "d") return value * 24;
+  return 4;
+}
+
+function candlesPerDayFor(timeframe) {
+  return Math.max(1, Math.round(24 / timeframeHoursFor(timeframe)));
+}
+
+function trendState(candle) {
+  if (!isFiniteNumber(candle?.ema20) || !isFiniteNumber(candle?.ema50)) return "flat";
+  if (candle.ema20 > candle.ema50 && candle.close >= candle.ema20) return "up";
+  if (candle.ema20 < candle.ema50 && candle.close <= candle.ema20) return "down";
+  return "flat";
+}
+
+function trendLabel(candle) {
+  const state = trendState(candle);
+  if (state === "up") return "trend up";
+  if (state === "down") return "trend down";
+  return "range";
+}
+
 function tradeFilterTone(tradeFilter) {
   if (tradeFilter?.status === "PASS") return "positive";
   if (tradeFilter?.status === "BLOCKED") return "negative";
   if (tradeFilter?.status === "NO SETUP") return "neutral";
   return "warning";
+}
+
+function confidenceTone(confidence) {
+  if (confidence?.label === "HIGH") return "positive";
+  if (confidence?.label === "MEDIUM") return "neutral";
+  if (confidence?.label === "LOW") return "warning";
+  return "neutral";
+}
+
+function confidenceTextClass(confidence) {
+  if (confidence?.label === "HIGH") return "text-emerald-300";
+  if (confidence?.label === "MEDIUM") return "text-cyan-200";
+  if (confidence?.label === "LOW") return "text-amber-200";
+  return "text-slate-100";
+}
+
+function confidenceBadgeClass(confidence) {
+  if (confidence?.label === "HIGH") return "border-emerald-300/30 bg-emerald-300/10 text-emerald-100";
+  if (confidence?.label === "MEDIUM") return "border-cyan-300/30 bg-cyan-300/10 text-cyan-100";
+  if (confidence?.label === "LOW") return "border-amber-300/30 bg-amber-300/10 text-amber-100";
+  return "border-white/10 bg-white/5 text-slate-300";
+}
+
+function scannerActionClass(action) {
+  if (action === "GO LONG") return "bg-emerald-300/15 text-emerald-200";
+  if (action === "GO SHORT") return "bg-rose-300/15 text-rose-200";
+  if (action === "STAY FLAT") return "bg-cyan-300/15 text-cyan-100";
+  return "bg-white/10 text-slate-300";
 }
 
 function paddedDomain(values, padding = 0.1) {

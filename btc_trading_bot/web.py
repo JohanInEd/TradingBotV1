@@ -13,9 +13,15 @@ from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 from urllib.parse import urlparse
 
+from btc_trading_bot.futures_simulator import (
+    FuturesSimulationReport,
+    FuturesSimulatorSettings,
+    simulate_futures,
+)
+from btc_trading_bot.history import HistoryStore
 from btc_trading_bot.app import (
     BotService,
     _apply_current_trade_filters,
@@ -63,7 +69,9 @@ class WebStateService:
         self._next_market_refresh: datetime | None = None
         self._next_futures_refresh: datetime | None = None
         self._next_news_refresh: datetime | None = None
+        self._next_simulator_refresh: datetime | None = None
         self._next_analysis: datetime | None = None
+        self._simulator_summary: dict[str, Any] | None = None
 
     def start(self) -> None:
         evaluation = self.service.evaluate()
@@ -77,6 +85,7 @@ class WebStateService:
         self._next_news_refresh = now + timedelta(
             seconds=self.settings.news_refresh_seconds
         )
+        self._next_simulator_refresh = now + timedelta(minutes=10)
         self._next_analysis = evaluation.next_analysis_at
         evaluation = replace(
             evaluation,
@@ -98,6 +107,7 @@ class WebStateService:
             ),
         )
         self._set_evaluation(evaluation)
+        self._refresh_simulator_summary()
 
         self.stream = RealtimeMarketStream(
             self.settings,
@@ -167,7 +177,10 @@ class WebStateService:
             "status": "ok",
             "evaluation": _jsonable(self._evaluation),
             "chart": _jsonable(self.service.chart_data()),
+            "trade_modes": _jsonable(self.service.trade_modes(self._evaluation)),
             "paper_journal": _jsonable(self.service.paper_setup_report()),
+            "confidence": _jsonable(build_confidence_score(self._evaluation)),
+            "simulator": _jsonable(self._simulator_summary),
             "generated_at": _jsonable(datetime.now(timezone.utc)),
         }
 
@@ -186,6 +199,7 @@ class WebStateService:
             or self._next_market_refresh is None
             or self._next_futures_refresh is None
             or self._next_news_refresh is None
+            or self._next_simulator_refresh is None
             or self._next_analysis is None
         ):
             return
@@ -203,6 +217,10 @@ class WebStateService:
                     evaluation.sentiment,
                     evaluation.macro,
                     self.settings,
+                )
+                scanner_result = self.service.refresh_scanner(
+                    evaluation.sentiment,
+                    evaluation.macro,
                 )
                 futures, trade_filter = self.service.build_futures_plan(
                     signal,
@@ -232,6 +250,7 @@ class WebStateService:
                     probability_forecast=self.service.probability_forecast,
                     scenario_forecast=self.service.scenario_forecast,
                     market_context=self.service.market_context,
+                    scanner=scanner_result,
                     evaluated_at=now,
                 )
                 self._next_analysis = next_analysis_boundary(
@@ -278,6 +297,10 @@ class WebStateService:
                     evaluation, f"News refresh failed: {exc}"
                 )
             self.news_future = None
+
+        if now >= self._next_simulator_refresh:
+            self._refresh_simulator_summary()
+            self._next_simulator_refresh = now + timedelta(minutes=10)
 
         stream_is_stale = (
             evaluation.market.source == "WebSocket"
@@ -379,6 +402,9 @@ class WebStateService:
             ),
         )
         self._set_evaluation(evaluation)
+
+    def _refresh_simulator_summary(self) -> None:
+        self._simulator_summary = build_simulator_summary(self.settings)
 
 
 class WebRequestHandler(BaseHTTPRequestHandler):
@@ -496,6 +522,295 @@ class WebServer(ThreadingHTTPServer):
     ) -> None:
         super().__init__(address, WebRequestHandler)
         self.state = state
+
+
+def build_confidence_score(evaluation: Evaluation) -> dict[str, Any]:
+    signal = evaluation.signal
+    futures = evaluation.futures
+    action = futures.action if futures is not None else "STAY FLAT"
+    side = futures.side if futures is not None else "FLAT"
+    directional = side in {"LONG", "SHORT"}
+
+    signal_strength = min(1.0, abs(signal.score))
+    timeframe_score = _timeframe_agreement(evaluation.technical, side)
+    probability_score = _probability_component(evaluation, side)
+    filter_score = _filter_component(evaluation)
+    context_score = _context_component(evaluation)
+
+    if directional:
+        weighted = (
+            signal_strength * 0.35
+            + timeframe_score * 0.25
+            + probability_score * 0.20
+            + filter_score * 0.10
+            + context_score * 0.10
+        )
+    else:
+        flat_strength = max(0.0, 1.0 - min(1.0, abs(signal.score) / 0.65))
+        weighted = (
+            flat_strength * 0.45
+            + timeframe_score * 0.20
+            + filter_score * 0.20
+            + context_score * 0.15
+        )
+
+    score = max(0.0, min(1.0, weighted))
+    percent = round(score * 100.0, 1)
+    if percent >= 75:
+        label = "HIGH"
+    elif percent >= 50:
+        label = "MEDIUM"
+    else:
+        label = "LOW"
+
+    factors = [
+        _factor("Signal strength", signal_strength),
+        _factor("Timeframe agreement", timeframe_score),
+        _factor("Probability evidence", probability_score),
+        _factor("Risk filters", filter_score),
+        _factor("Market context", context_score),
+    ]
+    return {
+        "label": label,
+        "score": score,
+        "percent": percent,
+        "action": action,
+        "side": side,
+        "summary": (
+            f"{label} confidence for {action}; combines signal strength, "
+            "timeframe agreement, probability evidence, risk filters, and context."
+        ),
+        "factors": factors,
+    }
+
+
+def build_simulator_summary(settings: Settings) -> dict[str, Any]:
+    if settings.history_db_path is None:
+        return {
+            "status": "not_configured",
+            "message": "Set BOT_HISTORY_DB_PATH to enable simulator dashboard data.",
+        }
+    symbols = settings.scanner_symbols or (settings.symbol,)
+    simulator_settings = FuturesSimulatorSettings(
+        primary_timeframe=settings.entry_timeframe,
+        daily_timeframe=settings.daily_timeframe,
+        entry_timeframe=settings.entry_timeframe,
+        row_limit=2000,
+        horizon_hours=settings.paper_setup_horizon_hours,
+        entry_threshold=settings.buy_threshold,
+    )
+    try:
+        with HistoryStore(settings.history_db_path) as store:
+            report = simulate_futures(
+                store,
+                exchange=settings.exchange,
+                symbols=symbols,
+                settings=settings,
+                simulator_settings=simulator_settings,
+            )
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "message": str(exc),
+            "generated_at": datetime.now(timezone.utc),
+        }
+    return _compact_simulator_report(report)
+
+
+def _compact_simulator_report(report: FuturesSimulationReport) -> dict[str, Any]:
+    all_trades = sorted(
+        (trade for result in report.results for trade in result.trades),
+        key=lambda trade: trade.entry_time,
+    )
+    return {
+        "status": "ok",
+        "exchange": report.exchange,
+        "symbols": report.symbols,
+        "generated_at": report.generated_at,
+        "settings": {
+            "timeframes": (
+                f"{report.settings.primary_timeframe}/"
+                f"{report.settings.daily_timeframe}/"
+                f"{report.settings.entry_timeframe}"
+            ),
+            "horizon_hours": report.settings.horizon_hours,
+            "fee_rate": report.settings.taker_fee_rate,
+            "funding_rate_8h": report.settings.funding_rate_8h,
+            "maintenance_margin_rate": report.settings.maintenance_margin_rate,
+        },
+        "overall": _compact_simulator_stats(report.overall),
+        "equity_curve": _equity_curve(
+            all_trades,
+            starting_equity=report.overall.starting_equity,
+        ),
+        "results": [
+            {
+                "symbol": result.symbol,
+                "error": result.error,
+                "stats": _compact_simulator_stats(result.stats),
+                "equity_curve": _equity_curve(
+                    result.trades,
+                    starting_equity=result.stats.starting_equity,
+                ),
+                "recent_trades": [
+                    {
+                        "side": trade.side,
+                        "outcome": trade.outcome,
+                        "entry_time": trade.entry_time,
+                        "exit_time": trade.exit_time,
+                        "entry_price": trade.entry_price,
+                        "exit_price": trade.exit_price,
+                        "net_r": trade.net_r,
+                        "net_pnl": trade.net_pnl,
+                        "fees": trade.fees,
+                        "funding": trade.funding,
+                        "liquidation_distance_percent": (
+                            trade.liquidation_distance_percent
+                        ),
+                    }
+                    for trade in result.trades[-6:]
+                ],
+            }
+            for result in report.results
+        ],
+    }
+
+
+def _compact_simulator_stats(stats: Any) -> dict[str, Any]:
+    return {
+        "total_trades": stats.total_trades,
+        "open_count": stats.open_count,
+        "tp_count": stats.tp_count,
+        "sl_count": stats.sl_count,
+        "expired_count": stats.expired_count,
+        "liquidated_count": stats.liquidated_count,
+        "win_rate": stats.win_rate,
+        "gross_expected_r": stats.gross_expected_r,
+        "net_expected_r": stats.net_expected_r,
+        "total_net_pnl": stats.total_net_pnl,
+        "total_fees": stats.total_fees,
+        "total_funding": stats.total_funding,
+        "return_percent": stats.return_percent,
+        "max_drawdown_percent": stats.max_drawdown_percent,
+        "liquidation_at_risk_count": stats.liquidation_at_risk_count,
+        "liquidation_touch_count": stats.liquidation_touch_count,
+        "average_duration_hours": stats.average_duration_hours,
+    }
+
+
+def _equity_curve(
+    trades: Sequence[Any],
+    *,
+    starting_equity: float,
+) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = [
+        {
+            "time": None,
+            "equity": starting_equity,
+            "net_pnl": 0.0,
+            "outcome": "START",
+            "symbol": None,
+        }
+    ]
+    equity = starting_equity
+    for trade in trades:
+        if trade.outcome == "OPEN":
+            continue
+        equity += trade.net_pnl
+        points.append(
+            {
+                "time": trade.exit_time or trade.entry_time,
+                "equity": equity,
+                "net_pnl": trade.net_pnl,
+                "outcome": trade.outcome,
+                "symbol": trade.symbol,
+            }
+        )
+    return points[-120:]
+
+
+def _timeframe_agreement(technical: Any, side: str) -> float:
+    scores = [
+        technical.base_score if technical.base_score is not None else technical.score,
+    ]
+    if technical.daily_trend is not None:
+        scores.append(technical.daily_trend.score)
+    if technical.hourly_entry is not None:
+        scores.append(technical.hourly_entry.score)
+    if side == "LONG":
+        return sum(1 for score in scores if score > 0) / len(scores)
+    if side == "SHORT":
+        return sum(1 for score in scores if score < 0) / len(scores)
+    mixed = any(score > 0 for score in scores) and any(score < 0 for score in scores)
+    return 1.0 if mixed else 0.65
+
+
+def _probability_component(evaluation: Evaluation, side: str) -> float:
+    probability = evaluation.probability_forecast
+    if probability is None:
+        return 0.5
+    confidence = {"HIGH": 1.0, "MEDIUM": 0.75, "LOW": 0.45}.get(
+        probability.confidence,
+        0.5,
+    )
+    if side == "LONG":
+        edge = (
+            probability.long_tp_before_sl_probability
+            - probability.long_sl_before_tp_probability
+        )
+        expected_r = probability.expected_long_r
+    elif side == "SHORT":
+        edge = (
+            probability.short_tp_before_sl_probability
+            - probability.short_sl_before_tp_probability
+        )
+        expected_r = probability.expected_short_r
+    else:
+        edge = probability.flat_probability
+        expected_r = 0.0
+    edge_score = max(0.0, min(1.0, 0.5 + edge))
+    r_score = max(0.0, min(1.0, 0.5 + (expected_r / 2.0)))
+    return confidence * 0.35 + edge_score * 0.40 + r_score * 0.25
+
+
+def _filter_component(evaluation: Evaluation) -> float:
+    trade_filter = evaluation.trade_filter
+    if trade_filter is None:
+        return 0.5
+    if trade_filter.status == "PASS":
+        return 1.0
+    if trade_filter.status == "BLOCKED":
+        return 0.1
+    if trade_filter.status == "NO SETUP":
+        return 0.65
+    return 0.5
+
+
+def _context_component(evaluation: Evaluation) -> float:
+    score = 0.75
+    volatility = evaluation.market_context.volatility_regime if evaluation.market_context else ""
+    if volatility == "HIGH VOLATILITY":
+        score -= 0.25
+    elif volatility == "ELEVATED VOLATILITY":
+        score -= 0.10
+    shakeout = evaluation.shakeout
+    if shakeout is not None:
+        if shakeout.status == "HIGH":
+            score -= 0.25
+        elif shakeout.status == "MEDIUM":
+            score -= 0.10
+    macro = evaluation.macro
+    if macro.risk_multiplier < 1.0 and evaluation.signal.score > 0:
+        score -= 0.15
+    return max(0.0, min(1.0, score))
+
+
+def _factor(label: str, score: float) -> dict[str, Any]:
+    return {
+        "label": label,
+        "score": max(0.0, min(1.0, score)),
+        "percent": round(max(0.0, min(1.0, score)) * 100.0, 1),
+    }
 
 
 def _jsonable(value: Any) -> Any:

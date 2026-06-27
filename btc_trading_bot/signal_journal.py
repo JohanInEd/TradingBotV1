@@ -115,6 +115,7 @@ def build_journal_record(
             "headlines": [
                 _headline_payload(item) for item in evaluation.sentiment.headlines
             ],
+            "events": _jsonable(evaluation.sentiment.events),
         },
         "macro": {
             "score": _finite_or_none(evaluation.macro.score),
@@ -122,6 +123,8 @@ def build_journal_record(
             "risk_multiplier": _finite_or_none(evaluation.macro.risk_multiplier),
             "alert_count": len(evaluation.macro.alerts),
             "alerts": [_headline_payload(item) for item in evaluation.macro.alerts],
+            "events": _jsonable(evaluation.macro.events),
+            "calendar": _jsonable(evaluation.macro.calendar),
         },
         "market_context": _jsonable(evaluation.market_context),
         "probability_forecast": _jsonable(evaluation.probability_forecast),
@@ -562,6 +565,10 @@ def _headline_payload(headline: Headline) -> dict[str, Any]:
         "published_at": _iso(headline.published_at),
         "category": headline.category,
         "sentiment": _finite_or_none(headline.sentiment),
+        "event_type": headline.event_type,
+        "event_impact": headline.event_impact,
+        "event_direction": headline.event_direction,
+        "event_confidence": _finite_or_none(headline.event_confidence),
     }
 
 

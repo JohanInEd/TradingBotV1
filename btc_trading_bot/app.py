@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -26,7 +27,11 @@ from btc_trading_bot.exchange import (
 )
 from btc_trading_bot.futures import build_futures_recommendation
 from btc_trading_bot.history import HistoryStore, recent_contiguous_candles
-from btc_trading_bot.indicators import analyze_multi_timeframe, build_chart_indicators
+from btc_trading_bot.indicators import (
+    analyze_multi_timeframe,
+    analyze_technicals,
+    build_chart_indicators,
+)
 from btc_trading_bot.market_context import analyze_market_context
 from btc_trading_bot.models import (
     Evaluation,
@@ -55,10 +60,12 @@ from btc_trading_bot.price_range import PriceRangeSettings, forecast_price_range
 from btc_trading_bot.realtime import RealtimeMarketStream, StreamEvent
 from btc_trading_bot.risk_filters import apply_do_not_trade_filters
 from btc_trading_bot.scenario_map import ScenarioMapSettings, forecast_scenario_map
+from btc_trading_bot.scanner import MarketScanner
 from btc_trading_bot.signal_journal import SignalJournalRecorder
 from btc_trading_bot.strategy import calculate_signal
 
 LOGGER = logging.getLogger(__name__)
+TRADE_MODE_TIMEFRAMES = ("4h", "1h", "30m")
 
 
 class BotService:
@@ -66,11 +73,13 @@ class BotService:
         self.settings = settings
         self.exchange = ExchangeClient(settings)
         self.news = NewsAnalyzer(settings)
+        self.scanner = MarketScanner(settings)
         self._live_candles: dict[str, Any] = {}
         self._price_range = None
         self._probability_forecast = None
         self._scenario_forecast = None
         self._market_context = None
+        self._trade_mode_contexts: dict[str, dict[str, Any]] = {}
         self.shakeout = ShakeoutMonitor(settings)
         self._shakeout_recorder = (
             ShakeoutEventRecorder(settings.shakeout_event_log_path)
@@ -113,6 +122,7 @@ class BotService:
         sentiment = blend_derivatives_crowding(sentiment, futures_metrics)
         evaluated_at = datetime.now(timezone.utc)
         signal = calculate_signal(technical, sentiment, macro, self.settings)
+        scanner_result = self.refresh_scanner(sentiment, macro)
         futures, trade_filter = self.build_futures_plan(
             signal,
             market,
@@ -167,6 +177,7 @@ class BotService:
                 errors=news_errors,
                 attempted_at=evaluated_at,
             ),
+            scanner=scanner_result,
         )
         self.record_signal_evaluation(evaluation)
         self.record_paper_setup(evaluation)
@@ -187,64 +198,22 @@ class BotService:
             self.settings.daily_timeframe: daily_candles.copy(),
             self.settings.entry_timeframe: hourly_candles.copy(),
         }
-        self._price_range = forecast_price_range(
-            four_hour_candles,
-            PriceRangeSettings(
-                horizon_hours=self.settings.price_range_horizon_hours,
-                horizon_candles=max(1, self.settings.price_range_horizon_hours // 4),
-                lookback_candles=self.settings.price_range_lookback_candles,
-            ),
-        )
-        try:
-            horizon_candles = max(
-                1, (self.settings.probability_horizon_hours + 3) // 4
-            )
-            self._probability_forecast = forecast_probability(
-                _probability_candles_for_backtest(
-                    self.settings,
-                    self.exchange.id,
-                    self.exchange.symbol,
-                    four_hour_candles,
-                    horizon_candles=horizon_candles,
-                ),
-                ProbabilityBacktestSettings(
-                    horizon_hours=self.settings.probability_horizon_hours,
-                    horizon_candles=horizon_candles,
-                    lookback_candles=self.settings.probability_lookback_candles,
-                    min_samples=self.settings.probability_min_samples,
-                    max_samples=self.settings.probability_max_samples,
-                ),
-                stop_loss_percent=self.settings.stop_loss_percent,
-                reward_to_risk=self.settings.reward_to_risk,
-            )
-        except ProbabilityBacktestError as exc:
-            LOGGER.warning("Probability backtest unavailable: %s", exc)
-            self._probability_forecast = None
-        try:
-            scenario_horizon_hours = 168
-            scenario_horizon_candles = max(1, scenario_horizon_hours // 4)
-            self._scenario_forecast = forecast_scenario_map(
-                _probability_candles_for_backtest(
-                    self.settings,
-                    self.exchange.id,
-                    self.exchange.symbol,
-                    four_hour_candles,
-                    horizon_candles=scenario_horizon_candles,
-                ),
-                ScenarioMapSettings(
-                    horizon_hours=scenario_horizon_hours,
-                    horizon_candles=scenario_horizon_candles,
-                    lookback_candles=max(
-                        220, self.settings.probability_lookback_candles
-                    ),
-                    min_samples=self.settings.probability_min_samples,
-                    max_samples=self.settings.probability_max_samples,
-                ),
-            )
-        except Exception as exc:
-            LOGGER.warning("7-day scenario map unavailable: %s", exc)
-            self._scenario_forecast = None
-        self._market_context = analyze_market_context(four_hour_candles)
+
+        for timeframe in TRADE_MODE_TIMEFRAMES:
+            if timeframe not in self._live_candles:
+                try:
+                    self._live_candles[timeframe] = self.exchange.fetch_closed_candles(
+                        timeframe
+                    )
+                except Exception as exc:
+                    LOGGER.warning("%s candle history unavailable: %s", timeframe, exc)
+
+        self._refresh_trade_mode_contexts()
+        primary_context = self._trade_mode_contexts.get(self.settings.timeframe, {})
+        self._price_range = primary_context.get("price_range")
+        self._probability_forecast = primary_context.get("probability_forecast")
+        self._scenario_forecast = primary_context.get("scenario_forecast")
+        self._market_context = primary_context.get("market_context")
         self.resolve_paper_setups(four_hour_candles)
         return self._analyze_candles(self._live_candles)
 
@@ -271,6 +240,89 @@ class BotService:
         return {
             "timeframe": self.settings.timeframe,
             "candles": build_chart_indicators(candles, limit=limit),
+        }
+
+    def trade_modes(
+        self,
+        evaluation: Evaluation,
+        *,
+        limit: int = 180,
+    ) -> dict[str, Any]:
+        modes: dict[str, Any] = {}
+        for timeframe in TRADE_MODE_TIMEFRAMES:
+            candles = self._live_candles.get(timeframe)
+            context = self._trade_mode_contexts.get(timeframe)
+            if candles is None or context is None:
+                modes[timeframe] = {
+                    "timeframe": timeframe,
+                    "label": _timeframe_label(timeframe),
+                    "available": False,
+                    "chart": {"timeframe": timeframe, "candles": []},
+                    "error": "Candle history is not available yet.",
+                }
+                continue
+
+            technical = context.get("technical")
+            if technical is None:
+                modes[timeframe] = {
+                    "timeframe": timeframe,
+                    "label": _timeframe_label(timeframe),
+                    "available": False,
+                    "chart": {
+                        "timeframe": timeframe,
+                        "candles": build_chart_indicators(candles, limit=limit),
+                    },
+                    "error": "Technical indicators are not available yet.",
+                }
+                continue
+
+            signal = calculate_signal(
+                technical,
+                evaluation.sentiment,
+                evaluation.macro,
+                self.settings,
+            )
+            futures, trade_filter = self.build_futures_plan(
+                signal,
+                evaluation.market,
+                probability_forecast=context.get("probability_forecast"),
+                market_context=context.get("market_context"),
+                shakeout=evaluation.shakeout,
+                futures_metrics=evaluation.futures_metrics,
+            )
+            paper_setup = build_current_paper_setup(
+                futures=futures,
+                technical=technical,
+                evaluated_at=evaluation.evaluated_at,
+                settings=self.settings,
+                market_context=context.get("market_context"),
+                probability_forecast=context.get("probability_forecast"),
+            )
+            modes[timeframe] = {
+                "timeframe": timeframe,
+                "label": _timeframe_label(timeframe),
+                "available": True,
+                "chart": {
+                    "timeframe": timeframe,
+                    "candles": build_chart_indicators(candles, limit=limit),
+                },
+                "technical": technical,
+                "signal": signal,
+                "futures": futures,
+                "trade_filter": trade_filter,
+                "paper_setup": paper_setup,
+                "price_range": context.get("price_range"),
+                "probability_forecast": context.get("probability_forecast"),
+                "scenario_forecast": context.get("scenario_forecast"),
+                "market_context": context.get("market_context"),
+            }
+        return {
+            "selected": self.settings.timeframe,
+            "options": tuple(
+                {"timeframe": timeframe, "label": _timeframe_label(timeframe)}
+                for timeframe in TRADE_MODE_TIMEFRAMES
+            ),
+            "modes": modes,
         }
 
     def build_futures_plan(
@@ -310,6 +362,11 @@ class BotService:
             self._market_context = analyze_market_context(
                 self._live_candles[timeframe]
             )
+        if timeframe in TRADE_MODE_TIMEFRAMES:
+            self._trade_mode_contexts[timeframe] = self._build_trade_mode_context(
+                timeframe,
+                self._live_candles[timeframe],
+            )
         return technical
 
     def _analyze_candles(
@@ -324,6 +381,120 @@ class BotService:
             hourly_weight=self.settings.entry_timeframe_weight,
         )
 
+    def _refresh_trade_mode_contexts(self) -> None:
+        self._trade_mode_contexts = {
+            timeframe: self._build_trade_mode_context(timeframe, candles)
+            for timeframe, candles in self._live_candles.items()
+            if timeframe in TRADE_MODE_TIMEFRAMES
+        }
+
+    def _build_trade_mode_context(
+        self,
+        timeframe: str,
+        candles: Any,
+    ) -> dict[str, Any]:
+        context: dict[str, Any] = {"timeframe": timeframe}
+        try:
+            context["technical"] = analyze_technicals(candles)
+        except Exception as exc:
+            LOGGER.warning("%s technical analysis unavailable: %s", timeframe, exc)
+            context["technical"] = None
+
+        price_range_horizon = _horizon_candles(
+            self.settings.price_range_horizon_hours,
+            timeframe,
+        )
+        try:
+            price_range = forecast_price_range(
+                candles,
+                PriceRangeSettings(
+                    horizon_hours=self.settings.price_range_horizon_hours,
+                    horizon_candles=price_range_horizon,
+                    lookback_candles=self.settings.price_range_lookback_candles,
+                ),
+            )
+            context["price_range"] = replace(
+                price_range,
+                method=price_range.method.replace("4h candles", f"{timeframe} candles"),
+            )
+        except Exception as exc:
+            LOGGER.warning("%s price range unavailable: %s", timeframe, exc)
+            context["price_range"] = None
+
+        probability_horizon = _horizon_candles(
+            self.settings.probability_horizon_hours,
+            timeframe,
+        )
+        try:
+            probability = forecast_probability(
+                _probability_candles_for_backtest(
+                    self.settings,
+                    self.exchange.id,
+                    self.exchange.symbol,
+                    candles,
+                    timeframe=timeframe,
+                    horizon_candles=probability_horizon,
+                ),
+                ProbabilityBacktestSettings(
+                    horizon_hours=self.settings.probability_horizon_hours,
+                    horizon_candles=probability_horizon,
+                    lookback_candles=self.settings.probability_lookback_candles,
+                    min_samples=self.settings.probability_min_samples,
+                    max_samples=self.settings.probability_max_samples,
+                ),
+                stop_loss_percent=self.settings.stop_loss_percent,
+                reward_to_risk=self.settings.reward_to_risk,
+            )
+            context["probability_forecast"] = replace(
+                probability,
+                method=probability.method.replace("4h technical", f"{timeframe} technical"),
+            )
+        except ProbabilityBacktestError as exc:
+            LOGGER.warning("%s probability backtest unavailable: %s", timeframe, exc)
+            context["probability_forecast"] = None
+
+        scenario_horizon_hours = 168
+        scenario_horizon = _horizon_candles(scenario_horizon_hours, timeframe)
+        try:
+            scenario = forecast_scenario_map(
+                _probability_candles_for_backtest(
+                    self.settings,
+                    self.exchange.id,
+                    self.exchange.symbol,
+                    candles,
+                    timeframe=timeframe,
+                    horizon_candles=scenario_horizon,
+                ),
+                ScenarioMapSettings(
+                    horizon_hours=scenario_horizon_hours,
+                    horizon_candles=scenario_horizon,
+                    lookback_candles=max(
+                        220, self.settings.probability_lookback_candles
+                    ),
+                    min_samples=self.settings.probability_min_samples,
+                    max_samples=self.settings.probability_max_samples,
+                ),
+            )
+            context["scenario_forecast"] = (
+                replace(
+                    scenario,
+                    method=scenario.method.replace("4h technical", f"{timeframe} technical"),
+                )
+                if scenario is not None
+                else None
+            )
+        except Exception as exc:
+            LOGGER.warning("%s scenario map unavailable: %s", timeframe, exc)
+            context["scenario_forecast"] = None
+
+        try:
+            context["market_context"] = analyze_market_context(candles)
+        except Exception as exc:
+            LOGGER.warning("%s market context unavailable: %s", timeframe, exc)
+            context["market_context"] = None
+
+        return context
+
     def refresh_news(
         self,
     ) -> tuple[
@@ -334,14 +505,22 @@ class BotService:
         try:
             headlines, feed_errors = self.news.fetch()
             sources, source_errors = self.news.fetch_sentiment_sources()
+            calendar = self.news.analyze_economic_calendar()
             sentiment = self.news.analyze_sentiment(headlines, sources=sources)
-            macro = self.news.analyze_macro(headlines)
+            macro = self.news.analyze_macro(headlines, calendar=calendar)
             return sentiment, macro, (*feed_errors, *source_errors)
         except NewsError as exc:
             return None, None, (str(exc),)
 
     def refresh_market(self) -> MarketSnapshot:
         return self.exchange.fetch_market_snapshot()
+
+    def refresh_scanner(
+        self,
+        sentiment: SentimentAnalysis,
+        macro: MacroAnalysis,
+    ):
+        return self.scanner.scan(sentiment, macro)
 
     def refresh_futures_metrics(
         self,
@@ -433,7 +612,8 @@ class BotService:
             return
         try:
             self._paper_setup_report = analyze_setup_rows(
-                self._paper_setup_journal.load_setups()
+                self._paper_setup_journal.load_setups(),
+                settings=self.settings,
             )
         except Exception as exc:
             LOGGER.warning("Paper setup report refresh failed: %s", exc)
@@ -452,14 +632,43 @@ def next_analysis_boundary(now: datetime, interval_hours: int) -> datetime:
     return boundary_day + timedelta(hours=boundary_hour)
 
 
+def _horizon_candles(horizon_hours: int, timeframe: str) -> int:
+    timeframe_hours = _timeframe_hours(timeframe)
+    if timeframe_hours <= 0:
+        return max(1, horizon_hours)
+    return max(1, int(math.ceil(horizon_hours / timeframe_hours)))
+
+
+def _timeframe_hours(timeframe: str) -> float:
+    value = timeframe.strip().lower()
+    try:
+        if value.endswith("m"):
+            return float(value[:-1]) / 60.0
+        if value.endswith("h"):
+            return float(value[:-1])
+        if value.endswith("d"):
+            return float(value[:-1]) * 24.0
+    except ValueError:
+        return 4.0
+    return 4.0
+
+
+def _timeframe_label(timeframe: str) -> str:
+    if timeframe == "30m":
+        return "30min Trade"
+    return f"{timeframe} Trade"
+
+
 def _probability_candles_for_backtest(
     settings: Settings,
     exchange: str,
     symbol: str,
     live_candles: Any,
     *,
+    timeframe: str | None = None,
     horizon_candles: int,
 ):
+    timeframe = timeframe or settings.timeframe
     if settings.history_db_path is None:
         return live_candles
     required = settings.probability_lookback_candles + horizon_candles + 80
@@ -468,7 +677,7 @@ def _probability_candles_for_backtest(
             stored = store.load_candles(
                 exchange,
                 symbol,
-                settings.timeframe,
+                timeframe,
                 limit=required,
             )
     except Exception as exc:
@@ -484,7 +693,7 @@ def _probability_candles_for_backtest(
         .drop_duplicates("timestamp", keep="last")
         .sort_values("timestamp")
     )
-    contiguous = recent_contiguous_candles(merged, settings.timeframe)
+    contiguous = recent_contiguous_candles(merged, timeframe)
     if len(contiguous) < required:
         return live_candles
     return contiguous.tail(required).reset_index(drop=True)
@@ -582,6 +791,10 @@ def run(settings: Settings, once: bool = False) -> int:
                             evaluation.macro,
                             settings,
                         )
+                        scanner_result = service.refresh_scanner(
+                            evaluation.sentiment,
+                            evaluation.macro,
+                        )
                         futures, trade_filter = service.build_futures_plan(
                             signal,
                             evaluation.market,
@@ -610,6 +823,7 @@ def run(settings: Settings, once: bool = False) -> int:
                             probability_forecast=service.probability_forecast,
                             scenario_forecast=service.scenario_forecast,
                             market_context=service.market_context,
+                            scanner=scanner_result,
                             evaluated_at=now,
                         )
                         next_analysis = next_analysis_boundary(

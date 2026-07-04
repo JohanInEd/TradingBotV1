@@ -5,10 +5,12 @@ confirmation, recent Bitcoin news sentiment, and a high-impact macro headline
 filter. Confirmed signals are also translated into paper futures guidance:
 `GO LONG`, `GO SHORT`, or `STAY FLAT`.
 
-The program is intentionally **signal-only**. It does not request exchange API
-keys and cannot place orders. Futures entry, stop, target, size, and maximum
-loss values are paper estimates for strategy validation. Binance USD-M mode
-uses the public perpetual-contract quote as its reference.
+By default the program is intentionally **signal-only**. It does not request
+exchange API keys and does not place orders. Futures entry, stop, target, size,
+and maximum loss values are paper estimates for strategy validation. Binance
+USD-M mode uses the public perpetual-contract quote as its reference. The only
+order-capable mode is the explicit `BOT_ACTIVE_TRADER_EXECUTION=binance_demo`
+path, which targets Binance Demo Trading rather than live Binance futures.
 
 ## Strategy
 
@@ -34,6 +36,13 @@ uses the public perpetual-contract quote as its reference.
   defensive multiplier. It does not suppress bearish signals.
 - Score above `+0.65`: `STRONG BUY`; below `-0.65`: `STRONG SELL`; otherwise:
   `HOLD / NEUTRAL`.
+- Regime-adaptive weighting (`BOT_ADAPTIVE_WEIGHTS`, on by default) conditions
+  the technical timeframe weights and signal thresholds on the market-context
+  regime: trending structure shifts weight toward the 4-hour strategy and daily
+  trend (55/35/10), range structure raises the confirmation bar to `±0.70` and
+  gives 1-hour entry timing more weight (50/20/30), and high volatility always
+  raises thresholds to `±0.75`. Position sizing and risk settings are never
+  changed by the profile, and the active profile is shown in the dashboards.
 - `STRONG BUY` becomes `GO LONG`; `STRONG SELL` becomes `GO SHORT`; every
   unconfirmed setup becomes `STAY FLAT`.
 - Futures size is estimated from paper equity, stop distance, configured risk,
@@ -105,6 +114,15 @@ $env:BOT_EXCHANGE = "binance-usdm"
 btc-tri-factor
 ```
 
+To keep Binance USD-M as the market-data backbone and add public Polymarket
+Bitcoin prediction-market context to the sentiment bucket:
+
+```powershell
+$env:BOT_EXCHANGE = "binance-usdm"
+$env:BOT_POLYMARKET_SENTIMENT = "true"
+btc-tri-factor
+```
+
 For a persistent Windows CMD dashboard with UTF-8 output, run:
 
 ```bat
@@ -152,6 +170,22 @@ After `web/dist` exists, `btc-tri-factor-web` serves the built interface from
 `http://127.0.0.1:8765`. Live updates use server-sent events at
 `/api/stream`, with `/api/snapshot` available for the current JSON state.
 
+The dashboard is organized into six tabs: `Overview` (signal, confidence,
+sentiment sources with per-asset chips, compact scanner, paper setup, and risk
+cards), `Active Trader` (the always-on $100 5-minute BTC paper execution
+account with its PnL growth curve and live execution cycle), `Long / Short Map`
+(the interactive chart), `Scanner` (the full sortable multi-symbol table with
+portfolio allocation status), `Performance` (the multi-symbol paper portfolio:
+equity curve with concurrent-position bars, net R distribution, grouped win
+rates, drift status, and the offline simulator), and `System` (signal profile,
+meta model, portfolio limits, drift detail, refresh health, market context, and
+recent errors).
+
+Read-only JSON endpoints back the same data: `/api/setups` (recent journal
+rows, filterable by `symbol`, `side`, `outcome`, and `limit`),
+`/api/performance` (journal report with equity curve and drift plus portfolio
+state), `/api/portfolio`, and `/api/drift`.
+
 The dashboard includes a BTC Long / Short Map for visual trade context. It
 draws recent 4-hour candles with EMA 20/50, VWAP, Bollinger bands,
 support/resistance, the probabilistic 24-hour range, and a current
@@ -191,16 +225,29 @@ prediction, and remains paper-only/informational.
 | `BOT_ANALYSIS_INTERVAL_HOURS` | `4` | Analysis boundary interval |
 | `BOT_HTTP_TIMEOUT_SECONDS` | `12` | Exchange and news HTTP timeout |
 | `BOT_HEADLINE_LIMIT` | `12` | Headlines shown in the dashboard |
+| `BOT_POLYMARKET_SENTIMENT` | `false` | Include public Polymarket Bitcoin directional market probabilities as an optional sentiment source |
+| `BOT_POLYMARKET_QUERY` | `bitcoin` | Polymarket search query used for prediction-market context |
+| `BOT_POLYMARKET_MARKET_LIMIT` | `12` | Maximum directional Polymarket markets used per refresh |
 | `BOT_ECONOMIC_CALENDAR` | `true` | Enable scheduled high-impact macro event watch |
 | `BOT_ECONOMIC_CALENDAR_PATH` | unset | Optional JSON or CSV calendar file with `name`, `event_type`, `scheduled_at`, `impact` |
 | `BOT_ECONOMIC_CALENDAR_LOOKAHEAD_HOURS` | `48` | Hours ahead to show configured or built-in macro events |
 | `BOT_ECONOMIC_CALENDAR_PRE_EVENT_HOURS` | `6` | Hours before a scheduled event to apply event-risk multiplier |
 | `BOT_ECONOMIC_CALENDAR_POST_EVENT_HOURS` | `2` | Hours after a scheduled event to keep event-risk multiplier active |
+| `BOT_ADAPTIVE_WEIGHTS` | `true` | Condition signal weights/thresholds on the market regime |
+| `BOT_PORTFOLIO_RISK` | `true` | Enable shared portfolio limits for paper setups |
+| `BOT_PORTFOLIO_MAX_OPEN_POSITIONS` | `4` | Maximum concurrent open paper positions across symbols |
+| `BOT_PORTFOLIO_MAX_SAME_DIRECTION` | `3` | Maximum correlated same-direction open positions |
+| `BOT_PORTFOLIO_MAX_OPEN_RISK` | `0.02` | Total planned open risk as a fraction of paper equity |
+| `BOT_PORTFOLIO_COOLDOWN_HOURS` | `8` | Per-symbol cooldown after a stop-loss outcome |
+| `BOT_PORTFOLIO_MAX_DRAWDOWN_PERCENT` | `15` | Paper-ledger drawdown that activates the kill switch |
+| `BOT_META_MODEL` | `true` | Enable the journal-trained TP-odds gate for new setups |
+| `BOT_META_MIN_TRAINING_SAMPLES` | `40` | Resolved TP/SL setups required before the meta model trains |
+| `BOT_META_MIN_TP_PROBABILITY` | `0.45` | Minimum estimated TP odds before a paper setup is allowed |
 | `BOT_PAPER_ACCOUNT_EQUITY` | `10000` | Paper account value used for sizing |
 | `BOT_RISK_PER_TRADE` | `0.005` | Maximum planned loss as equity fraction |
 | `BOT_STOP_LOSS_PERCENT` | `0.015` | Stop distance from entry |
 | `BOT_REWARD_TO_RISK` | `2.0` | Take-profit distance relative to stop |
-| `BOT_FUTURES_LEVERAGE` | `1` | Paper leverage, capped at 3 |
+| `BOT_FUTURES_LEVERAGE` | `5` | Paper leverage, capped at 5 |
 | `BOT_MAX_POSITION_FRACTION` | `0.25` | Maximum margin allocation |
 | `BOT_PAPER_LEDGER_FEE_RATE` | `0.0004` | Per-side fee rate used by the paper ledger net PnL model |
 | `BOT_PAPER_LEDGER_SLIPPAGE_BPS` | `2.0` | Per-side slippage estimate in basis points for paper ledger net PnL |
@@ -227,6 +274,33 @@ prediction, and remains paper-only/informational.
 | `BOT_PAPER_SETUP_JOURNAL_PATH` | unset | Optional SQLite file for closed-candle GO LONG / GO SHORT paper setup tracking |
 | `BOT_PAPER_SETUP_HORIZON_HOURS` | `24` | Hours before an unresolved paper setup is marked `EXPIRED` |
 | `BOT_HISTORY_DB_PATH` | unset | Optional SQLite file for public OHLCV history used by offline analysis and probability calibration |
+| `BOT_SCALPING_ENABLED` | `true` | Enable the independent closed-5-minute-candle scalping signal |
+| `BOT_SCALPING_REFRESH_SECONDS` | `300` | How often the scalping signal re-evaluates on closed 5m candles |
+| `BOT_SCALPING_BUY_THRESHOLD` | `0.50` | Scalping-only technical score above which the signal is bullish |
+| `BOT_SCALPING_SELL_THRESHOLD` | `-0.50` | Scalping-only technical score below which the signal is bearish |
+| `BOT_SCALPING_STOP_LOSS_PERCENT` | `0.003` | Scalping stop distance from entry (0.3%), independent of `BOT_STOP_LOSS_PERCENT` |
+| `BOT_SCALPING_REWARD_TO_RISK` | `1.5` | Scalping take-profit distance relative to stop |
+| `BOT_SCALPING_RISK_PER_TRADE` | `0.0025` | Scalping maximum planned loss as equity fraction |
+| `BOT_SCALPING_HORIZON_HOURS` | `2` | Hours before an unresolved scalp setup is marked `EXPIRED` |
+| `BOT_SCALPING_JOURNAL_PATH` | unset | Optional SQLite file, separate from `BOT_PAPER_SETUP_JOURNAL_PATH`, for scalp setup tracking |
+| `BOT_ACTIVE_TRADER_ENABLED` | `true` | Enable the always-on 5-minute BTC active paper trader shown in the `Active Trader` tab |
+| `BOT_ACTIVE_TRADER_EQUITY` | `100` | Starting paper balance for the active trader simulation |
+| `BOT_ACTIVE_TRADER_MARGIN_USD` | `50` | Isolated paper margin committed to each active-trader futures fill before leverage |
+| `BOT_ACTIVE_TRADER_REFRESH_SECONDS` | `1` | How often the active trader runs a new execution cycle |
+| `BOT_ACTIVE_TRADER_RISK_PER_TRADE` | `0.02` | Legacy risk-based sizing input; active futures fills use `BOT_ACTIVE_TRADER_MARGIN_USD` |
+| `BOT_ACTIVE_TRADER_JOURNAL_PATH` | `data/active-trader-fills.jsonl` | Append-only JSONL log of active-trader opens and settlements with PnL |
+| `BOT_ACTIVE_TRADER_EXECUTION` | `paper` | `paper` local simulation or `binance_demo` market orders on Binance USD-M Demo Trading |
+| `BOT_BINANCE_DEMO_API_KEY` | unset | Binance Demo Trading API key, required only for `BOT_ACTIVE_TRADER_EXECUTION=binance_demo` |
+| `BOT_BINANCE_DEMO_API_SECRET` | unset | Binance Demo Trading API secret, required only for `BOT_ACTIVE_TRADER_EXECUTION=binance_demo` |
+| `BOT_BINANCE_DEMO_BASE_URL` | `https://demo-fapi.binance.com` | Binance USD-M Demo Trading REST endpoint; live Binance endpoints are refused |
+| `BOT_BINANCE_DEMO_RECV_WINDOW_MS` | `5000` | Signed request receive window for Binance Demo orders |
+| `BOT_ACTIVE_TRADER_EARLY_TP_MODE` | `positive_roi` | Early take-profit mode: `disabled`, `positive_roi`, `min_roi`, or `progress` |
+| `BOT_ACTIVE_TRADER_EARLY_TP_MIN_ROI_PERCENT` | `0.0` | Minimum net ROI on margin before an early active-trader TP is allowed |
+| `BOT_ACTIVE_TRADER_REENTRY_MODE` | `immediate` | Same-cycle re-entry mode: `immediate`, `same_direction`, `flip_on_reversal`, or `disabled_after_exit` |
+| `BOT_ACTIVE_TRADER_FLIP_THRESHOLD` | `0.50` | Minimum absolute 5m technical bias required to flip direction in `flip_on_reversal` mode |
+| `BOT_ACTIVE_TRADER_COOLDOWN_CANDLES` | `3` | Same-side fill cooldown, in completed 5m candles, after `EXPIRED`, `STOP_LOSS`, or `PROTECTED_STOP` |
+| `BOT_ACTIVE_TRADER_BREAKEVEN_PROGRESS_PERCENT` | `50.0` | Move the active-trader protected stop to breakeven once this percent of target progress is observed |
+| `BOT_ACTIVE_TRADER_FORCE_PROFIT_PROGRESS_PERCENT` | `75.0` | In `progress` early-TP mode, require this percent of target progress before banking a profitable close |
 
 To scan a multi-coin futures universe for paper long/short candidates, set
 `BOT_SYMBOLS` before starting the terminal bot or web API:
@@ -242,6 +316,41 @@ confirmation, current market sentiment, macro filter, and paper futures action
 used by the main BTC view. Symbols are reported as `GO LONG`, `GO SHORT`,
 `STAY FLAT`, or `UNAVAILABLE`. This scanner is still signal-only and does not
 place orders.
+
+Scanner symbols are fetched concurrently through cached per-symbol exchange
+clients instead of a serial loop, so a large universe refreshes in a few
+round-trips. Headlines are tagged per asset (ETH, SOL, XRP, and the rest of the
+universe) and each scanned coin swaps the Bitcoin headline component of the
+sentiment score for its own asset-tagged headlines when at least two are
+available; Fear & Greed and derivatives crowding stay market-wide. The scanner
+table reports whether each row used `asset` or `global` sentiment.
+
+When a paper setup journal is configured, the scanner also records `GO LONG` /
+`GO SHORT` candidates for non-primary symbols into the same journal and
+resolves their outcomes from each symbol's public candles, which turns the
+journal into a multi-symbol paper portfolio.
+
+Portfolio risk limits (`BOT_PORTFOLIO_*`) treat all scanned crypto symbols as
+one correlated group and gate every new paper setup, both the primary symbol
+and scanner candidates: a maximum number of concurrent open paper positions, a
+same-direction cap (five correlated longs behave like one oversized long), a
+shared open-risk budget as a fraction of paper equity, a per-symbol cooldown
+after a stop-loss, and a drawdown kill switch computed from the paper ledger.
+Blocked candidates keep their raw signal but show the blocking reason, and the
+current portfolio state is visible in the dashboard.
+
+The meta model gate (`BOT_META_MODEL`, on by default) trains a small logistic
+regression on resolved TP/SL journal outcomes (side, technical score, ATR,
+range position, trend strength, reward/risk, and expected R). Once at least
+`BOT_META_MIN_TRAINING_SAMPLES` resolved setups exist, it estimates TP odds for
+each new directional setup and blocks paper guidance below
+`BOT_META_MIN_TP_PROBABILITY`. Until then it reports `UNTRAINED` and never
+blocks.
+
+The journal report also includes a portfolio equity curve across all recorded
+symbols with concurrent-position counts, and a performance drift monitor that
+compares the recent win rate against the long-run baseline with a binomial
+z-score, reporting `NORMAL`, `WARNING`, or `ALERT` when the live edge degrades.
 
 To record live public depth, aggregate trade, liquidation, open-interest, and
 top-trader crowding inputs for later shakeout review:
@@ -348,6 +457,139 @@ net R, and max drawdown. The web dashboard shows this compact live summary when
 This paper setup layer is still signal-only and paper-only. It does not request
 exchange credentials, call private APIs, place real orders, or auto-trade.
 
+## 5-Minute Scalping System
+
+`BOT_SCALPING_ENABLED` (on by default) runs a second, independent paper signal
+on closed 5-minute candles alongside the main 4h-anchored system. It is
+purely technical: it skips news and macro sentiment entirely, since those
+are far too slow-moving to matter on a 5-minute horizon, and evaluates the
+same EMA 20/50, RSI 14, and MACD scoring used elsewhere, re-checked every
+`BOT_SCALPING_REFRESH_SECONDS` (5 minutes by default) against a closed 5m
+candle. A score above `BOT_SCALPING_BUY_THRESHOLD` (`+0.50`) or below
+`BOT_SCALPING_SELL_THRESHOLD` (`-0.50`) becomes `GO LONG` / `GO SHORT`;
+otherwise the scalp signal stays flat.
+
+Risk sizing is deliberately tight and configured separately from the main
+system: `BOT_SCALPING_STOP_LOSS_PERCENT` (0.3%), `BOT_SCALPING_REWARD_TO_RISK`
+(1.5), and `BOT_SCALPING_RISK_PER_TRADE` (0.25% of paper equity), since the
+main system's 1.5%/2:1 swing-trade settings would rarely be touched by
+5-minute price action. The same do-not-trade market-context filters used by
+the main system (ATR ceiling, range-extreme chasing) still apply.
+
+Setting `BOT_SCALPING_JOURNAL_PATH` records scalp setups into their own
+SQLite journal, completely separate from `BOT_PAPER_SETUP_JOURNAL_PATH`.
+This keeps the scalping system's win rate, meta-model training, and
+portfolio limits from ever mixing with the main 4h system: a scalp trade on
+BTC does not block or get blocked by the main BTC position, and resolved
+scalp outcomes never feed the main meta-model gate. Only one open scalp
+setup per symbol is allowed at a time; while one is open, new scalp signals
+report `STAY FLAT` with a reason instead of stacking additional entries.
+Unresolved setups expire after `BOT_SCALPING_HORIZON_HOURS` (2 hours).
+
+Analyze recorded scalp setups with the same analyzer used for the main
+paper journal:
+
+```powershell
+btc-paper-setups data/scalping-setups.sqlite
+```
+
+The web dashboard's Overview tab shows a `5-Minute Scalp Signal` card with
+the current technical score, RSI, MACD histogram, paper entry/stop/target
+when directional, and a compact summary of the scalp journal (total setups,
+open count, win rate, expected R, net PnL) when `BOT_SCALPING_JOURNAL_PATH`
+is set. The terminal dashboard shows the same signal as a `5m Scalp` line
+inside the main signal panel. This layer is still signal-only and
+paper-only: it does not request exchange credentials, place real orders, or
+auto-trade.
+
+## 5-Minute Active Trader
+
+`BOT_ACTIVE_TRADER_ENABLED` (on by default) adds an always-on paper trading
+account that refreshes every second against completed 5-minute BTC candles and is shown in its
+own `Active Trader` dashboard tab. Unlike the scalping layer, which only
+journals signals, the active trader holds one paper position at a time and
+compounds a single balance seeded at `BOT_ACTIVE_TRADER_EQUITY` (default $100),
+so the tab can chart realized **PnL growth** over the session.
+
+Every `BOT_ACTIVE_TRADER_REFRESH_SECONDS` (1 second by default) it runs one
+**execution cycle** with five gated stages:
+
+- **Scam detect** - blocks the cycle when live shakeout/microstructure stress is
+  `HIGH` (treated as possible manipulation).
+- **Validate** - runs the same do-not-trade market-context filters used
+  elsewhere (ATR ceiling, range-extreme chasing, and so on).
+- **Size** - commits fixed isolated paper margin from
+  `BOT_ACTIVE_TRADER_MARGIN_USD` (default $50) and applies
+  `BOT_FUTURES_LEVERAGE` (default 5x), so the default active fill is about
+  $250 notional.
+- **Fill** - opens a paper position at the closed-candle entry when the account
+  is flat; while another position is running, the cycle keeps preparing the
+  current long/short candidate and waits to fill until the open position
+  resolves.
+- **Settle** - resolves the open position against later public closed candles as
+  `TP`, `SL`, or `EXPIRED`, using the same conservative same-candle rule as the
+  paper setup journal, then rolls the net PnL (after fees and slippage) into the
+  balance.
+
+Because the active trader refreshes every second and receives live mark-price
+updates, an unresolved position with positive net ROI can be banked as an early
+`TP` before the current 5-minute candle closes, even if the original take-profit
+level was not touched. That realizes the gain, frees the account, and lets the
+next 1-second cycle prepare or open the next paper trade when the setup still
+clears. If no live early close occurs, the same logic is applied again when the
+next completed 5-minute candle arrives.
+Set `BOT_ACTIVE_TRADER_EARLY_TP_MODE` to `min_roi` to require
+`BOT_ACTIVE_TRADER_EARLY_TP_MIN_ROI_PERCENT`, to `progress` to require both
+positive net ROI and `BOT_ACTIVE_TRADER_FORCE_PROFIT_PROGRESS_PERCENT`, or to
+`disabled` to keep profitable unresolved candles as `EXPIRED`.
+
+Same-cycle re-entry is controlled by `BOT_ACTIVE_TRADER_REENTRY_MODE`.
+`immediate` preserves the default behavior, `same_direction` only reopens in
+the side that just settled, `flip_on_reversal` allows an opposite-side reopen
+only when the absolute 5-minute technical bias reaches
+`BOT_ACTIVE_TRADER_FLIP_THRESHOLD`, and `disabled_after_exit` waits until the
+next execution cycle. When a candle reaches
+`BOT_ACTIVE_TRADER_BREAKEVEN_PROGRESS_PERCENT` of the target before settlement,
+the active-trader position tracks a protected breakeven stop for subsequent
+resolution.
+After an `EXPIRED`, `STOP_LOSS`, or `PROTECTED_STOP` exit,
+`BOT_ACTIVE_TRADER_COOLDOWN_CANDLES` blocks same-side fills for a few completed
+5-minute candles while the bot keeps scanning every cycle. The dashboard shows
+this as a `COOLDOWN` fill-stage result instead of slowing the market analysis.
+
+The tab shows starting and current equity, net PnL, return, win rate, max
+drawdown, the live execution cycle, the current open position with unrealized
+PnL, recent settled fills with exit reasons such as `EARLY_TP`, `TARGET_HIT`,
+`PROTECTED_STOP`, `STOP_LOSS`, and `EXPIRED`, and the PnL growth curve (one
+point per settled trade). Each paper open and settlement is appended to
+`BOT_ACTIVE_TRADER_JOURNAL_PATH` (default `data/active-trader-fills.jsonl`)
+with entry, exit, net PnL, net R, equity, drawdown, and setup context so losses
+and gains can be reviewed after restart. The account balance itself is still a
+session simulation and resets when the service restarts. This layer is still
+paper-only: it does not request exchange
+credentials, submit orders, or auto-trade. Position notional is the configured
+paper margin multiplied by the configured leverage.
+The Active Trader dashboard also graphs recent cycle outcomes across the
+scam-detect, validate, size, fill, and settle stages, and raises a scam-detect
+alert when high shakeout/manipulation risk blocks a setup.
+
+To mirror the active-trader lifecycle with Binance USD-M Demo Trading market
+orders, create Binance Demo Trading API credentials and opt in explicitly:
+
+```powershell
+$env:BOT_EXCHANGE = "binance-usdm"
+$env:BOT_ACTIVE_TRADER_EXECUTION = "binance_demo"
+$env:BOT_BINANCE_DEMO_API_KEY = "your-demo-key"
+$env:BOT_BINANCE_DEMO_API_SECRET = "your-demo-secret"
+btc-tri-factor-web
+```
+
+In `binance_demo` mode, the strategy still uses the same local validation,
+sizing, and settlement logic, but a successful fill requires a signed demo
+market order at `https://demo-fapi.binance.com`. Demo close orders are sent as
+reduce-only market orders when the local TP, SL, expiry, or early-TP condition
+resolves. Live Binance futures endpoints are refused by the demo client.
+
 To keep a local store of public historical candles, set `BOT_HISTORY_DB_PATH`
 and run `btc-history-sync` for the exchange, symbol, and timeframes you want to
 cache:
@@ -405,6 +647,22 @@ Before simulating a symbol, sync all required timeframes:
 btc-history-sync --exchange binance-usdm --symbol SUI/USDT:USDT --timeframes 1h,4h,1d
 ```
 
+Run a rolling walk-forward parameter evaluation over the same local history:
+
+```powershell
+$env:BOT_HISTORY_DB_PATH = "data/history.sqlite"
+btc-walkforward --exchange binance-usdm --symbols BTC/USDT,ETH/USDT --folds 4 --test-days 21 --train-days 90
+```
+
+The harness replays every candidate parameter set (entry threshold, stop
+percent, reward/risk via `--thresholds`, `--stops`, `--ratios`) over the full
+candle history, then for each fold picks the best set on the train window and
+scores it on the following unseen test window. The report shows per-fold
+choices, out-of-sample trades, win rate, net expected R, and PnL, plus a pooled
+out-of-sample comparison against the currently configured baseline. Judge
+parameters by the pooled out-of-sample row, not the train rows; in-sample
+selection can always overfit. This is an offline analysis tool only.
+
 ## Test
 
 ```powershell
@@ -418,16 +676,28 @@ The bot is organized as a small Python package with these responsibilities:
 - `exchange.py`: public CCXT ticker, closed candles, and stream normalization.
 - `realtime.py`: background CCXT Pro ticker and OHLCV WebSocket subscriptions.
 - `indicators.py`: 4-hour technical analysis, multi-timeframe scoring, and chart-ready indicator series.
-- `news.py`: Bitcoin sentiment and macro-risk analysis.
+- `news.py`: Bitcoin and per-asset sentiment plus macro-risk analysis.
 - `strategy.py`: weighted tri-factor score and final signal classification.
+- `adaptive.py`: regime-conditioned signal weights and thresholds.
 - `futures.py`: long/short/flat guidance and risk-based paper sizing.
+- `scalping.py`: independent closed-5-minute-candle scalping signal, tight paper sizing, and its own journal.
+- `active_trader.py`: always-on $100 5-minute BTC paper execution account with a compounding balance and realized PnL growth.
+- `portfolio.py`: shared multi-symbol paper position limits and kill switch.
+- `meta_model.py`: journal-trained logistic TP-odds gate for new setups.
 - `backtest.py`: candle-only historical probability and TP/SL calibration.
+- `walkforward.py`: rolling train/test parameter evaluation over local history.
 - `microstructure.py`: rolling order-book, taker-flow, liquidation, and open-interest shakeout risk.
 - `market_context.py`: volatility regime, range position, and trend/range context.
+- `scanner.py`: concurrent multi-symbol scans, per-asset sentiment, and portfolio allocation.
 - `app.py`: evaluation scheduling and service orchestration.
 - `dashboard.py`: Rich terminal dashboard and static report.
 - `web.py`: React dashboard API, server-sent events, static serving, and chart payloads.
 - `models.py`: immutable analysis and evaluation data models.
+
+The React dashboard source in `web/src` is organized into `lib/` (formatting
+helpers and the snapshot SSE hook) and `components/` (header/tabs, signal,
+news, confidence, scanner, performance, and system panels), with the
+interactive Long / Short Map remaining in `main.jsx`.
 
 The technical factor now combines:
 
@@ -500,7 +770,8 @@ gating, live ticker normalization, provisional candle merging, stale-stream
 fallback, independent news updates, strategy weighting, futures guidance, risk
 sizing, news analysis, Binance USD-M market resolution, concurrent RSS fetches,
 futures-specific indicators, shakeout replay and stream-health behavior,
-refresh-health transitions, and Windows console encoding.
+refresh-health transitions, the independent 5-minute scalping signal and its
+journal, and Windows console encoding.
 
 ## Risk Notice
 

@@ -9,6 +9,7 @@ from btc_trading_bot.news import (
     classify_headline,
     fear_greed_source_from_payload,
     gdelt_headlines_from_payload,
+    polymarket_source_from_payload,
 )
 
 
@@ -66,6 +67,40 @@ def test_fear_greed_source_maps_index_to_score() -> None:
     assert source.name == "Crypto Fear & Greed"
     assert source.score == 0.5
     assert source.label == "Greed"
+
+
+def test_polymarket_source_maps_directional_markets_to_sentiment() -> None:
+    source = polymarket_source_from_payload(
+        {
+            "events": [
+                {
+                    "markets": [
+                        {
+                            "question": "Will Bitcoin be above $120,000 on July 31?",
+                            "active": True,
+                            "closed": False,
+                            "outcomes": '["Yes","No"]',
+                            "outcomePrices": '["0.70","0.30"]',
+                            "volume24hr": 10000,
+                        },
+                        {
+                            "question": "Will Bitcoin be below $90,000 on July 31?",
+                            "active": True,
+                            "closed": False,
+                            "outcomes": '["Yes","No"]',
+                            "outcomePrices": '["0.20","0.80"]',
+                            "volume24hr": 8000,
+                        },
+                    ]
+                }
+            ]
+        },
+        now=datetime(2026, 6, 18, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert source.name == "Polymarket Bitcoin markets"
+    assert source.score > 0
+    assert "2 active directional markets" in source.detail
 
 
 def test_gdelt_payload_builds_crypto_and_macro_headlines() -> None:
@@ -203,3 +238,48 @@ def test_feed_requests_run_concurrently(monkeypatch) -> None:
 
     assert len(headlines) == 2
     assert errors == ()
+
+
+def test_tag_assets_matches_names_and_case_sensitive_tickers() -> None:
+    from btc_trading_bot.news import tag_assets, tracked_assets
+
+    assets = tracked_assets(Settings(scanner_symbols=("ETH/USDT", "SUI/USDT", "DOT/USDT")))
+
+    assert tag_assets("Ethereum rallies as ETH funding turns positive", assets) == ("ETH",)
+    assert tag_assets("Bitcoin and Solana lead the market higher", ("BTC", "SOL")) == ("BTC", "SOL")
+    # Lowercase common words must not trigger short-ticker tags.
+    assert tag_assets("Court hears sui generis lawsuit over polka dot art", assets) == ()
+    assert tag_assets("SUI and DOT climb after upgrade", assets) == ("SUI", "DOT")
+
+
+def test_analyze_sentiment_builds_asset_scores_and_asset_swap() -> None:
+    from btc_trading_bot.news import sentiment_for_asset
+
+    analyzer = NewsAnalyzer(Settings(scanner_symbols=("BTC/USDT", "ETH/USDT")))
+    try:
+        result = analyzer.analyze_sentiment(
+            [
+                _headline("Bitcoin plunges after ETF outflow shock"),
+                _headline("Ethereum surges on record adoption rally"),
+                _headline("Ethereum breakout accelerates as inflows rise"),
+            ]
+        )
+    finally:
+        analyzer.close()
+
+    by_asset = {item.asset: item for item in result.asset_sentiment}
+    assert by_asset["BTC"].headline_count == 1
+    assert by_asset["ETH"].headline_count == 2
+    assert by_asset["ETH"].score > 0 > by_asset["BTC"].score
+    # Global score is driven by the BTC headline component.
+    assert result.score < 0
+
+    adjusted, applied = sentiment_for_asset(result, "ETH", min_headlines=2)
+    assert applied is True
+    assert adjusted.score > result.score
+    news_source = next(s for s in adjusted.sources if s.name == "Bitcoin headlines")
+    assert "ETH" in news_source.detail
+
+    unchanged, applied_btc = sentiment_for_asset(result, "BTC")
+    assert applied_btc is False
+    assert unchanged is result

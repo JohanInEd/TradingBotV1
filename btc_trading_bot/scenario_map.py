@@ -143,19 +143,19 @@ def forecast_scenario_map(
             current_time,
             current_price,
             median_changes,
-            candle_hours=max(1, settings.horizon_hours // settings.horizon_candles),
+            candle_hours=settings.horizon_hours / settings.horizon_candles,
         ),
         lower_band_path=_build_path_points(
             current_time,
             current_price,
             lower_changes,
-            candle_hours=max(1, settings.horizon_hours // settings.horizon_candles),
+            candle_hours=settings.horizon_hours / settings.horizon_candles,
         ),
         upper_band_path=_build_path_points(
             current_time,
             current_price,
             upper_changes,
-            candle_hours=max(1, settings.horizon_hours // settings.horizon_candles),
+            candle_hours=settings.horizon_hours / settings.horizon_candles,
         ),
         expected_low=min(current_price, current_price * (1.0 + downside)),
         expected_high=max(current_price, current_price * (1.0 + upside)),
@@ -323,7 +323,7 @@ def _build_path_points(
     current_price: float,
     changes: list[float],
     *,
-    candle_hours: int,
+    candle_hours: float,
 ) -> tuple[ScenarioPathPoint, ...]:
     return tuple(
         ScenarioPathPoint(

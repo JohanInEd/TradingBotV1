@@ -302,3 +302,83 @@ def test_web_api_payload_includes_current_paper_setup_shape() -> None:
     assert "BTC" in setup["position_estimate"]
     assert "no order placed" in setup["disclaimer"]
     assert "not financial advice" in setup["disclaimer"]
+
+
+def test_portfolio_equity_curve_tracks_concurrency_and_equity() -> None:
+    from btc_trading_bot.config import Settings
+    from btc_trading_bot.paper_setups import (
+        analyze_setup_rows,
+        build_paper_ledger_trades,
+        build_portfolio_equity_curve,
+    )
+
+    def _row(symbol, signal_hour, outcome_hour, outcome, r):
+        return {
+            "symbol": symbol,
+            "side": "LONG",
+            "outcome": outcome,
+            "entry": 100.0,
+            "quantity_btc": 1.0,
+            "notional": 100.0,
+            "max_loss": 50.0,
+            "r_multiple": r,
+            "outcome_price": 100.0 + r,
+            "signal_time": f"2026-07-01T{signal_hour:02d}:00:00+00:00",
+            "outcome_at": f"2026-07-01T{outcome_hour:02d}:00:00+00:00",
+            "outcome_candle_at": f"2026-07-01T{outcome_hour:02d}:00:00+00:00",
+            "duration_hours": float(outcome_hour - signal_hour),
+            "closed_candle_at": f"2026-07-01T{signal_hour:02d}:00:00+00:00",
+        }
+
+    settings = Settings(paper_account_equity=1000.0)
+    rows = [
+        _row("BTC/USDT:USDT", 0, 8, "TP", 2.0),
+        _row("ETH/USDT:USDT", 4, 8, "SL", -1.0),
+    ]
+    trades = build_paper_ledger_trades(rows, settings=settings)
+    curve = build_portfolio_equity_curve(trades, settings=settings)
+
+    assert curve[0]["outcome"] == "START"
+    assert curve[0]["equity"] == 1000.0
+    assert len(curve) == 3
+    # Both trades were open when the first one exited at 08:00.
+    assert curve[1]["open_positions"] == 2
+    assert curve[-1]["equity"] < 1100.0  # 2R win minus 1R loss minus costs
+    assert curve[-1]["equity"] > 1000.0
+
+    report = analyze_setup_rows(rows, settings=settings)
+    assert report.equity_curve == curve
+    assert report.drift is not None
+    assert report.drift.status == "INSUFFICIENT DATA"
+
+
+def test_drift_alert_when_recent_win_rate_collapses() -> None:
+    from btc_trading_bot.paper_setups import assess_performance_drift
+
+    def _resolved(index, outcome):
+        return {
+            "symbol": "BTC/USDT:USDT",
+            "outcome": outcome,
+            "r_multiple": 2.0 if outcome == "TP" else -1.0,
+            "outcome_at": f"2026-06-{(index % 28) + 1:02d}T{index % 24:02d}:00:00+00:00",
+        }
+
+    # Baseline of 40 with 70% wins, then 20 recent with 20% wins.
+    rows = [_resolved(i, "TP" if i % 10 < 7 else "SL") for i in range(40)]
+    rows += [_resolved(40 + i, "TP" if i % 10 < 2 else "SL") for i in range(20)]
+    # outcome_at ordering must put the losing streak last.
+    for position, row in enumerate(rows):
+        row["outcome_at"] = f"2026-06-01T00:{position:02d}:00+00:00"
+
+    drift = assess_performance_drift(rows)
+
+    assert drift is not None
+    assert drift.status == "ALERT"
+    assert drift.recent_win_rate is not None and drift.recent_win_rate <= 0.25
+    assert drift.win_rate_z is not None and drift.win_rate_z <= -2.5
+
+    healthy = assess_performance_drift(
+        [_resolved(i, "TP" if i % 2 == 0 else "SL") for i in range(60)]
+    )
+    assert healthy is not None
+    assert healthy.status == "NORMAL"

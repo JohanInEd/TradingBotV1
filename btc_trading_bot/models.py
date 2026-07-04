@@ -87,6 +87,7 @@ class Headline:
     event_impact: str = "LOW"
     event_direction: str = "NEUTRAL"
     event_confidence: float = 0.0
+    assets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,12 +129,22 @@ class SentimentSource:
 
 
 @dataclass(frozen=True, slots=True)
+class AssetSentiment:
+    asset: str
+    score: float
+    label: str
+    headline_count: int
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SentimentAnalysis:
     score: float
     label: str
     headlines: tuple[Headline, ...] = ()
     sources: tuple[SentimentSource, ...] = ()
     events: tuple[NewsEventSummary, ...] = ()
+    asset_sentiment: tuple[AssetSentiment, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +155,28 @@ class MacroAnalysis:
     alerts: tuple[Headline, ...] = ()
     events: tuple[NewsEventSummary, ...] = ()
     calendar: EconomicCalendarRisk | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MetaModelAssessment:
+    status: str
+    trained: bool
+    sample_count: int
+    tp_probability: float | None
+    threshold: float
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class SignalProfile:
+    name: str
+    reason: str
+    buy_threshold: float
+    sell_threshold: float
+    primary_weight: float
+    daily_weight: float
+    hourly_weight: float
+    adaptive: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +242,30 @@ class PaperSetup:
 
 
 @dataclass(frozen=True, slots=True)
+class PortfolioState:
+    open_positions: int
+    long_positions: int
+    short_positions: int
+    open_risk_usd: float
+    equity: float
+    peak_equity: float
+    current_drawdown_percent: float
+    kill_switch_active: bool
+    generated_at: datetime
+    open_symbols: tuple[str, ...] = ()
+    cooldowns: tuple[tuple[str, datetime], ...] = ()
+    open_setup_keys: tuple[tuple[str, str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioDecision:
+    allowed: bool
+    status: str
+    reasons: tuple[str, ...] = ()
+    state: PortfolioState | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ScannerCandidate:
     symbol: str
     action: str
@@ -226,6 +283,8 @@ class ScannerCandidate:
     volatility_regime: str | None
     reason: str
     error: str | None = None
+    sentiment_basis: str = "global"
+    portfolio_status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +293,7 @@ class MarketScannerResult:
     candidates: tuple[ScannerCandidate, ...]
     generated_at: datetime
     errors: tuple[str, ...] = ()
+    portfolio: PortfolioState | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,6 +404,145 @@ class ShakeoutAnalysis:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionStage:
+    name: str
+    status: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionCycle:
+    status: str
+    stages: tuple[ExecutionStage, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveTraderCyclePoint:
+    recorded_at: datetime
+    status: str
+    side: str
+    action: str
+    technical_score: float
+    scam_status: str
+    validate_status: str
+    size_status: str
+    fill_status: str
+    settle_status: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class ScalpingEvaluation:
+    technical: TechnicalAnalysis
+    market_context: MarketContext | None
+    signal: SignalResult
+    futures: FuturesRecommendation
+    trade_filter: TradeFilterResult | None
+    paper_setup: PaperSetup | None
+    evaluated_at: datetime
+    execution_cycle: ExecutionCycle | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveTradePosition:
+    """A single open paper position held by the active trader."""
+
+    side: str
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    quantity_btc: float
+    notional: float
+    max_loss: float
+    reward_to_risk: float
+    opened_at: datetime
+    candle_time: datetime
+    expires_at: datetime
+    original_stop_loss: float | None = None
+    protected_stop_loss: float | None = None
+    execution_mode: str = "paper"
+    open_order_id: str | None = None
+    open_order_status: str | None = None
+    open_order_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveTradeFill:
+    """A closed paper trade with the reason the active trader used to exit."""
+
+    side: str
+    outcome: str
+    entry_price: float
+    exit_price: float
+    quantity_btc: float
+    gross_pnl: float
+    fees: float
+    net_pnl: float
+    net_r: float
+    opened_at: datetime
+    closed_at: datetime
+    exit_reason: str = ""
+    roi_percent: float = 0.0
+    execution_mode: str = "paper"
+    close_order_id: str | None = None
+    close_order_status: str | None = None
+    close_order_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveTraderAccount:
+    """Rolling state of the fixed-size active-trading paper account."""
+
+    starting_equity: float
+    equity: float
+    realized_pnl: float
+    return_percent: float
+    peak_equity: float
+    max_drawdown_percent: float
+    closed_trades: int
+    wins: int
+    losses: int
+    win_rate: float | None
+    open_position: ActiveTradePosition | None
+    unrealized_pnl: float = 0.0
+    unrealized_roi_percent: float = 0.0
+    open_margin: float = 0.0
+    open_total_pnl: float = 0.0
+    open_total_return_percent: float = 0.0
+    open_progress_percent: float = 0.0
+    open_distance_to_stop_percent: float | None = None
+    open_distance_to_target_percent: float | None = None
+    mark_price: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveTraderSnapshot:
+    """Immutable per-tick view of the active trader for the dashboard."""
+
+    enabled: bool
+    symbol: str
+    interval_seconds: int
+    evaluated_at: datetime
+    account: ActiveTraderAccount
+    execution_cycle: ExecutionCycle | None = None
+    technical: TechnicalAnalysis | None = None
+    signal: SignalResult | None = None
+    futures: FuturesRecommendation | None = None
+    growth_curve: tuple[dict[str, float | str | None], ...] = ()
+    recent_fills: tuple[ActiveTradeFill, ...] = ()
+    cycle_history: tuple[ActiveTraderCyclePoint, ...] = ()
+    last_action: str = "IDLE"
+    last_detail: str = ""
+    execution_mode: str = "paper"
+    execution_status: str = "paper simulation"
+    cooldown_detail: str = ""
+    scam_alert: str = ""
+    disclaimer: str = (
+        "paper only; no order placed; not financial advice; session simulation"
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class Evaluation:
     market: MarketSnapshot
     technical: TechnicalAnalysis
@@ -370,3 +569,8 @@ class Evaluation:
     futures_health: RefreshHealth = field(default_factory=RefreshHealth)
     news_health: RefreshHealth = field(default_factory=RefreshHealth)
     scanner: MarketScannerResult | None = None
+    portfolio: PortfolioDecision | None = None
+    signal_profile: SignalProfile | None = None
+    meta: MetaModelAssessment | None = None
+    scalping: ScalpingEvaluation | None = None
+    active_trader: ActiveTraderSnapshot | None = None

@@ -519,6 +519,26 @@ def _signal_panel(evaluation: Evaluation) -> Panel:
             style="dim",
         )
         content.append(range_line)
+    if evaluation.scalping is not None:
+        scalp = evaluation.scalping
+        scalp_line = Text(justify="center")
+        scalp_line.append("5m Scalp: ", style="bold cyan")
+        setup = scalp.paper_setup
+        if setup is not None:
+            scalp_style = "bold green" if setup.side == "LONG" else "bold red"
+            scalp_line.append(setup.action, style=scalp_style)
+            scalp_line.append(
+                f" | Entry {setup.entry_price:,.2f}"
+                f" | Stop {setup.stop_loss:,.2f}"
+                f" | TP {setup.take_profit:,.2f}"
+                f" | R/R {setup.reward_to_risk:.2f}",
+                style="bold",
+            )
+        else:
+            scalp_line.append(scalp.futures.action, style="dim")
+            if scalp.futures.reason:
+                scalp_line.append(f" | {scalp.futures.reason}", style="dim")
+        content.append(scalp_line)
     if evaluation.scanner is not None and evaluation.scanner.candidates:
         top = [
             candidate

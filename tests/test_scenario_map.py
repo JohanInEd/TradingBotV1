@@ -86,6 +86,54 @@ def test_forecast_scenario_map_builds_7_day_path_distribution() -> None:
     assert "not a prediction" in forecast.method
 
 
+def _five_minute_candles(count: int = 200, *, step: float = 1.0) -> pd.DataFrame:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    rows = []
+    price = 100.0
+    for index in range(count):
+        open_price = price
+        close = price + step
+        high = max(open_price, close) + abs(step) * 1.5
+        low = min(open_price, close) - abs(step) * 0.2
+        rows.append(
+            {
+                "timestamp": start + timedelta(minutes=5 * index),
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": 10.0,
+            }
+        )
+        price = close
+    return pd.DataFrame(rows)
+
+
+def test_forecast_scenario_map_builds_1_hour_path_for_5m_candles() -> None:
+    forecast = forecast_scenario_map(
+        _five_minute_candles(200),
+        ScenarioMapSettings(
+            horizon_hours=1,
+            horizon_candles=12,
+            lookback_candles=120,
+            min_samples=20,
+            max_samples=60,
+        ),
+    )
+
+    assert forecast is not None
+    assert forecast.horizon_hours == 1
+    assert len(forecast.median_path) == 12
+    # Sub-hourly horizons must space path points by the candle interval
+    # (5 minutes), not truncate to whole hours.
+    assert forecast.median_path[1].time - forecast.median_path[0].time == timedelta(
+        minutes=5
+    )
+    assert forecast.median_path[-1].time - forecast.median_path[0].time == timedelta(
+        minutes=55
+    )
+
+
 def test_forecast_scenario_map_calculates_direction_probabilities() -> None:
     candles = _alternating_candles()
     forecast = forecast_scenario_map(

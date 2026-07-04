@@ -6,6 +6,7 @@ import csv
 import json
 import calendar as calendar_module
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -22,6 +23,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from btc_trading_bot.config import NewsFeed, Settings
 from btc_trading_bot.models import (
+    AssetSentiment,
     EconomicCalendarEvent,
     EconomicCalendarRisk,
     FuturesMetrics,
@@ -34,6 +36,25 @@ from btc_trading_bot.models import (
 
 BITCOIN_PATTERN = re.compile(
     r"\b(bitcoin|btc)\b", re.IGNORECASE
+)
+# Per-asset headline tagging. Full names match case-insensitively; short
+# tickers match case-sensitively to avoid common-word false positives
+# (e.g. "sui generis", "polka dot", "ada").
+ASSET_NAME_RULES: dict[str, str] = {
+    "BTC": r"\b(bitcoin|btc)\b",
+    "ETH": r"\b(ethereum|ether)\b",
+    "SOL": r"\bsolana\b",
+    "BNB": r"\b(bnb|binance coin)\b",
+    "XRP": r"\b(xrp|ripple)\b",
+    "DOGE": r"\bdogecoin\b",
+    "ADA": r"\bcardano\b",
+    "LINK": r"\bchainlink\b",
+    "AVAX": r"\bavalanche\b",
+    "DOT": r"\bpolkadot\b",
+    "SUI": r"\bsui network\b",
+}
+CASE_SENSITIVE_TICKER_ASSETS = frozenset(
+    {"ETH", "SOL", "DOGE", "ADA", "LINK", "AVAX", "DOT", "SUI"}
 )
 MACRO_PATTERN = re.compile(
     r"\b("
@@ -54,13 +75,16 @@ NEGATIVE_RISK_PATTERN = re.compile(
 )
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 FEAR_GREED_URL = "https://api.alternative.me/fng/"
+POLYMARKET_SEARCH_URL = "https://gamma-api.polymarket.com/search"
 DERIVATIVES_SOURCE_NAME = "Derivatives crowding"
 NEWS_SOURCE_NAME = "Bitcoin headlines"
 FEAR_GREED_SOURCE_NAME = "Crypto Fear & Greed"
+POLYMARKET_SOURCE_NAME = "Polymarket Bitcoin markets"
 SENTIMENT_SOURCE_WEIGHTS = {
     NEWS_SOURCE_NAME: 0.65,
     FEAR_GREED_SOURCE_NAME: 0.20,
     DERIVATIVES_SOURCE_NAME: 0.15,
+    POLYMARKET_SOURCE_NAME: 0.10,
 }
 EVENT_RULES = (
     (
@@ -122,6 +146,41 @@ BUILT_IN_CALENDAR_TYPES = {
 }
 
 
+def base_asset(symbol: str) -> str:
+    """Return the base asset code for a CCXT symbol, e.g. ETH/USDT:USDT -> ETH."""
+    return symbol.split("/", 1)[0].split(":", 1)[0].strip().upper()
+
+
+@lru_cache(maxsize=None)
+def _asset_patterns(asset: str) -> tuple[re.Pattern[str], ...]:
+    asset = asset.strip().upper()
+    patterns: list[re.Pattern[str]] = []
+    name_rule = ASSET_NAME_RULES.get(asset)
+    if name_rule is not None:
+        patterns.append(re.compile(name_rule, re.IGNORECASE))
+    if asset in CASE_SENSITIVE_TICKER_ASSETS or name_rule is None:
+        ticker_flags = 0 if asset in CASE_SENSITIVE_TICKER_ASSETS else re.IGNORECASE
+        patterns.append(re.compile(rf"\b{re.escape(asset)}\b", ticker_flags))
+    return tuple(patterns)
+
+
+def tracked_assets(settings: Settings) -> tuple[str, ...]:
+    assets: list[str] = ["BTC"]
+    for symbol in (settings.symbol, *settings.scanner_symbols):
+        asset = base_asset(symbol)
+        if asset and asset not in assets:
+            assets.append(asset)
+    return tuple(assets)
+
+
+def tag_assets(title: str, assets: Iterable[str]) -> tuple[str, ...]:
+    matched: list[str] = []
+    for asset in assets:
+        if any(pattern.search(title) for pattern in _asset_patterns(asset)):
+            matched.append(asset)
+    return tuple(matched)
+
+
 class NewsError(RuntimeError):
     """Raised when all configured news sources fail."""
 
@@ -129,6 +188,7 @@ class NewsError(RuntimeError):
 class NewsAnalyzer:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.tracked_assets = tracked_assets(settings)
         self.analyzer = SentimentIntensityAnalyzer()
         self.analyzer.lexicon.update(
             {
@@ -183,10 +243,18 @@ class NewsAnalyzer:
     def fetch_sentiment_sources(
         self,
     ) -> tuple[tuple[SentimentSource, ...], tuple[str, ...]]:
+        sources: list[SentimentSource] = []
+        errors: list[str] = []
         try:
-            return (self._fetch_fear_greed_source(),), ()
+            sources.append(self._fetch_fear_greed_source())
         except (requests.RequestException, ValueError, KeyError) as exc:
-            return (), (f"{FEAR_GREED_SOURCE_NAME}: {exc}",)
+            errors.append(f"{FEAR_GREED_SOURCE_NAME}: {exc}")
+        if self.settings.polymarket_sentiment_enabled:
+            try:
+                sources.append(self._fetch_polymarket_source())
+            except (requests.RequestException, ValueError, KeyError) as exc:
+                errors.append(f"{POLYMARKET_SOURCE_NAME}: {exc}")
+        return tuple(sources), tuple(errors)
 
     def _fetch_feed(self, feed: NewsFeed) -> list[Headline]:
         session = _build_session(self.settings)
@@ -219,7 +287,8 @@ class NewsAnalyzer:
             if title_tag is None:
                 continue
             title = _clean_text(title_tag.get_text(" ", strip=True))
-            if feed.category == "crypto" and not BITCOIN_PATTERN.search(title):
+            assets = tag_assets(title, self.tracked_assets)
+            if feed.category == "crypto" and not assets:
                 continue
             published = _entry_date(entry, now)
             age_seconds = max(0.0, (now - published).total_seconds())
@@ -233,6 +302,7 @@ class NewsAnalyzer:
                         url=_entry_url(entry),
                         published_at=published,
                         category=feed.category,
+                        assets=assets,
                     )
                 )
             )
@@ -270,6 +340,7 @@ class NewsAnalyzer:
             response.json(),
             now=datetime.now(timezone.utc),
             max_age_hours=max(self.settings.news_max_age_hours, 48),
+            assets=self.tracked_assets,
         )
 
     def _fetch_fear_greed_source(self) -> SentimentSource:
@@ -291,6 +362,35 @@ class NewsAnalyzer:
         response.raise_for_status()
         return fear_greed_source_from_payload(response.json())
 
+    def _fetch_polymarket_source(self) -> SentimentSource:
+        session = _build_session(self.settings)
+        try:
+            response = session.get(
+                POLYMARKET_SEARCH_URL,
+                params={
+                    "q": self.settings.polymarket_search_query,
+                    "events_status": "active",
+                    "limit_per_type": self.settings.polymarket_market_limit,
+                    "search_profiles": "false",
+                    "keep_closed_markets": 0,
+                },
+                timeout=self.settings.request_timeout_seconds,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (compatible; BTC-Tri-Factor-Bot/1.0; "
+                        "+https://github.com/)"
+                    ),
+                },
+            )
+        finally:
+            session.close()
+        response.raise_for_status()
+        return polymarket_source_from_payload(
+            response.json(),
+            now=datetime.now(timezone.utc),
+            limit=self.settings.polymarket_market_limit,
+        )
+
     def analyze_sentiment(
         self,
         headlines: Iterable[Headline],
@@ -298,28 +398,56 @@ class NewsAnalyzer:
     ) -> SentimentAnalysis:
         now = datetime.now(timezone.utc)
         scored: list[Headline] = []
-        weighted_sum = 0.0
-        total_weight = 0.0
+        btc_weighted_sum = 0.0
+        btc_total_weight = 0.0
+        btc_count = 0
+        asset_totals: dict[str, list[float]] = {}
         for headline in headlines:
             if headline.category != "crypto":
                 continue
+            if not headline.assets:
+                headline = replace(
+                    headline,
+                    assets=tag_assets(headline.title, self.tracked_assets),
+                )
             score = self.analyzer.polarity_scores(headline.title)["compound"]
             age_hours = max(
                 0.0, (now - headline.published_at).total_seconds() / 3600
             )
             recency_weight = math.pow(0.5, age_hours / 24.0)
-            weighted_sum += score * recency_weight
-            total_weight += recency_weight
+            if "BTC" in headline.assets:
+                btc_weighted_sum += score * recency_weight
+                btc_total_weight += recency_weight
+                btc_count += 1
+            for asset in headline.assets:
+                totals = asset_totals.setdefault(asset, [0.0, 0.0, 0.0])
+                totals[0] += score * recency_weight
+                totals[1] += recency_weight
+                totals[2] += 1.0
             scored.append(classify_headline(replace(headline, sentiment=score)))
 
-        headline_average = weighted_sum / total_weight if total_weight else 0.0
+        headline_average = (
+            btc_weighted_sum / btc_total_weight if btc_total_weight else 0.0
+        )
         headline_average = _clamp(headline_average)
+        asset_sentiment = tuple(
+            AssetSentiment(
+                asset=asset,
+                score=_clamp(totals[0] / totals[1]) if totals[1] else 0.0,
+                label=_sentiment_label(
+                    _clamp(totals[0] / totals[1]) if totals[1] else 0.0
+                ),
+                headline_count=int(totals[2]),
+                updated_at=now,
+            )
+            for asset, totals in sorted(asset_totals.items())
+        )
         source_breakdown = [
             SentimentSource(
                 name=NEWS_SOURCE_NAME,
                 score=headline_average,
                 label=_sentiment_label(headline_average),
-                detail=f"{len(scored)} recent Bitcoin headlines",
+                detail=f"{btc_count} recent Bitcoin headlines",
                 updated_at=now,
             )
         ]
@@ -332,6 +460,7 @@ class NewsAnalyzer:
             headlines=tuple(scored[: self.settings.headline_limit]),
             sources=tuple(source_breakdown),
             events=event_summaries(scored),
+            asset_sentiment=asset_sentiment,
         )
 
     def analyze_macro(
@@ -485,6 +614,66 @@ def neutral_sentiment() -> SentimentAnalysis:
     return SentimentAnalysis(score=0.0, label="Neutral", headlines=())
 
 
+def sentiment_for_asset(
+    sentiment: SentimentAnalysis,
+    asset: str,
+    *,
+    min_headlines: int = 2,
+) -> tuple[SentimentAnalysis, bool]:
+    """Rebuild the sentiment score with asset-specific headlines when available.
+
+    Returns the (possibly adjusted) analysis and whether an asset-specific
+    headline score replaced the Bitcoin headline component. Market-wide
+    sources such as Fear & Greed and derivatives crowding keep their weights.
+    """
+    asset = asset.strip().upper()
+    if asset == "BTC":
+        return sentiment, False
+    entry = next(
+        (
+            item
+            for item in sentiment.asset_sentiment
+            if item.asset == asset and item.headline_count >= min_headlines
+        ),
+        None,
+    )
+    if entry is None:
+        return sentiment, False
+
+    sources = tuple(
+        replace(
+            source,
+            score=entry.score,
+            label=_sentiment_label(entry.score),
+            detail=f"{entry.headline_count} recent {asset} headlines",
+        )
+        if source.name == NEWS_SOURCE_NAME
+        else source
+        for source in sentiment.sources
+    )
+    if not any(source.name == NEWS_SOURCE_NAME for source in sources):
+        sources = (
+            SentimentSource(
+                name=NEWS_SOURCE_NAME,
+                score=entry.score,
+                label=_sentiment_label(entry.score),
+                detail=f"{entry.headline_count} recent {asset} headlines",
+                updated_at=entry.updated_at,
+            ),
+            *sources,
+        )
+    score = _weighted_source_score(sources)
+    return (
+        replace(
+            sentiment,
+            score=score,
+            label=_sentiment_label(score),
+            sources=sources,
+        ),
+        True,
+    )
+
+
 def blend_derivatives_crowding(
     sentiment: SentimentAnalysis,
     metrics: FuturesMetrics | None,
@@ -506,6 +695,7 @@ def blend_derivatives_crowding(
         headlines=sentiment.headlines,
         sources=sources,
         events=sentiment.events,
+        asset_sentiment=sentiment.asset_sentiment,
     )
 
 
@@ -573,16 +763,51 @@ def fear_greed_source_from_payload(payload: dict) -> SentimentSource:
     )
 
 
+def polymarket_source_from_payload(
+    payload: object,
+    *,
+    now: datetime,
+    limit: int = 12,
+) -> SentimentSource:
+    scored: list[tuple[float, float, str, float]] = []
+    for market in _iter_polymarket_markets(payload):
+        market_score = _polymarket_market_score(market)
+        if market_score is None:
+            continue
+        score, weight, question, yes_price = market_score
+        scored.append((score, weight, question, yes_price))
+        if len(scored) >= limit:
+            break
+    if not scored:
+        raise ValueError("response did not include usable active Bitcoin markets")
+    weighted_sum = sum(score * weight for score, weight, _, _ in scored)
+    total_weight = sum(weight for _, weight, _, _ in scored)
+    score = _clamp(weighted_sum / total_weight) if total_weight else 0.0
+    top = max(scored, key=lambda item: item[1])
+    return SentimentSource(
+        name=POLYMARKET_SOURCE_NAME,
+        score=score,
+        label=_sentiment_label(score),
+        detail=(
+            f"{len(scored)} active directional markets; "
+            f"top Yes {top[3]:.0%}: {_truncate(top[2], 72)}"
+        ),
+        updated_at=now,
+    )
+
+
 def gdelt_headlines_from_payload(
     payload: dict,
     *,
     now: datetime,
     max_age_hours: int,
+    assets: Iterable[str] = ("BTC",),
 ) -> list[Headline]:
     articles = payload.get("articles")
     if not isinstance(articles, list):
         raise ValueError("response did not include GDELT articles")
     cutoff_seconds = max_age_hours * 3600
+    tracked = tuple(assets)
     headlines: list[Headline] = []
     for article in articles:
         if not isinstance(article, dict):
@@ -594,7 +819,8 @@ def gdelt_headlines_from_payload(
         if (now - published).total_seconds() > cutoff_seconds:
             continue
         domain = str(article.get("domain") or "GDELT")
-        category = "crypto" if BITCOIN_PATTERN.search(title) else "macro"
+        matched = tag_assets(title, tracked)
+        category = "crypto" if matched else "macro"
         headlines.append(
             classify_headline(
                 Headline(
@@ -603,6 +829,7 @@ def gdelt_headlines_from_payload(
                     url=str(article.get("url") or ""),
                     published_at=published,
                     category=category,
+                    assets=matched,
                 )
             )
         )
@@ -933,6 +1160,142 @@ def _derivatives_detail(metrics: FuturesMetrics) -> str:
     if metrics.taker_buy_sell_ratio is not None:
         parts.append(f"taker buy/sell {metrics.taker_buy_sell_ratio:.2f}")
     return ", ".join(parts) if parts else "No usable derivatives crowding inputs"
+
+
+def _iter_polymarket_markets(payload: object) -> Iterable[dict[str, object]]:
+    if isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, dict):
+                yield item
+        return
+    if not isinstance(payload, dict):
+        return
+    markets = payload.get("markets")
+    if isinstance(markets, list):
+        for market in markets:
+            if isinstance(market, dict):
+                yield market
+    events = payload.get("events")
+    if isinstance(events, list):
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            event_markets = event.get("markets")
+            if isinstance(event_markets, list):
+                for market in event_markets:
+                    if isinstance(market, dict):
+                        yield market
+
+
+def _polymarket_market_score(
+    market: dict[str, object],
+) -> tuple[float, float, str, float] | None:
+    if market.get("closed") is True or market.get("active") is False:
+        return None
+    question = _clean_text(
+        str(
+            market.get("question")
+            or market.get("title")
+            or market.get("slug")
+            or ""
+        )
+    )
+    if not question or not BITCOIN_PATTERN.search(question):
+        return None
+    direction = _polymarket_question_direction(question)
+    if direction is None:
+        return None
+    yes_price = _polymarket_yes_price(market)
+    if yes_price is None:
+        return None
+    volume = _float_field(market, "volume24hr", "volume24hrClob", "volumeNum", "volume")
+    liquidity = _float_field(market, "liquidityClob", "liquidityNum", "liquidity")
+    weight = max(1.0, min(8.0, math.log10(max(volume, liquidity, 0.0) + 10.0)))
+    score = _clamp(direction * ((yes_price - 0.5) * 2.0))
+    return score, weight, question, yes_price
+
+
+def _polymarket_question_direction(question: str) -> int | None:
+    text = question.lower()
+    bullish = (
+        "above",
+        "over",
+        "greater than",
+        "at or above",
+        "reach",
+        "hit",
+        "all-time high",
+        "ath",
+        "new high",
+        "higher than",
+    )
+    bearish = (
+        "below",
+        "under",
+        "less than",
+        "at or below",
+        "drop",
+        "crash",
+        "dip",
+        "lower than",
+    )
+    has_bullish = any(term in text for term in bullish)
+    has_bearish = any(term in text for term in bearish)
+    if has_bullish and not has_bearish:
+        return 1
+    if has_bearish and not has_bullish:
+        return -1
+    return None
+
+
+def _polymarket_yes_price(market: dict[str, object]) -> float | None:
+    outcomes = _json_list(market.get("outcomes"))
+    prices = _json_list(market.get("outcomePrices"))
+    if not prices:
+        return None
+    if outcomes:
+        for index, outcome in enumerate(outcomes):
+            if str(outcome).strip().lower() == "yes" and index < len(prices):
+                return _price_or_none(prices[index])
+    return _price_or_none(prices[0])
+
+
+def _json_list(value: object) -> list[object]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(parsed, list):
+            return parsed
+    return []
+
+
+def _price_or_none(value: object) -> float | None:
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    if 0.0 <= price <= 1.0:
+        return price
+    return None
+
+
+def _float_field(market: dict[str, object], *names: str) -> float:
+    for name in names:
+        try:
+            return float(market.get(name) or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _truncate(value: str, max_length: int) -> str:
+    if len(value) <= max_length:
+        return value
+    return value[: max(0, max_length - 3)].rstrip() + "..."
 
 
 def _clamp(value: float) -> float:

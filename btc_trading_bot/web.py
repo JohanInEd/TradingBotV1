@@ -14,7 +14,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Sequence
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from btc_trading_bot.futures_simulator import (
     FuturesSimulationReport,
@@ -70,6 +70,8 @@ class WebStateService:
         self._next_futures_refresh: datetime | None = None
         self._next_news_refresh: datetime | None = None
         self._next_simulator_refresh: datetime | None = None
+        self._next_scalping_refresh: datetime | None = None
+        self._next_active_trader_refresh: datetime | None = None
         self._next_analysis: datetime | None = None
         self._simulator_summary: dict[str, Any] | None = None
 
@@ -87,6 +89,30 @@ class WebStateService:
         )
         self._next_simulator_refresh = now + timedelta(minutes=10)
         self._next_analysis = evaluation.next_analysis_at
+        if self.settings.scalping_enabled:
+            try:
+                evaluation = replace(
+                    evaluation, scalping=self.service.refresh_scalping()
+                )
+            except Exception as exc:
+                evaluation = _with_error(
+                    evaluation, f"Scalping refresh failed: {exc}"
+                )
+        self._next_scalping_refresh = now + timedelta(
+            seconds=self.settings.scalping_refresh_seconds
+        )
+        if self.settings.active_trader_enabled:
+            try:
+                evaluation = replace(
+                    evaluation, active_trader=self.service.refresh_active_trader()
+                )
+            except Exception as exc:
+                evaluation = _with_error(
+                    evaluation, f"Active trader refresh failed: {exc}"
+                )
+        self._next_active_trader_refresh = now + timedelta(
+            seconds=self.settings.active_trader_refresh_seconds
+        )
         evaluation = replace(
             evaluation,
             market_health=replace(
@@ -179,8 +205,65 @@ class WebStateService:
             "chart": _jsonable(self.service.chart_data()),
             "trade_modes": _jsonable(self.service.trade_modes(self._evaluation)),
             "paper_journal": _jsonable(self.service.paper_setup_report()),
+            "scalping_journal": _jsonable(self.service.scalping_report()),
+            "portfolio_state": _jsonable(self.service.portfolio_state()),
             "confidence": _jsonable(build_confidence_score(self._evaluation)),
             "simulator": _jsonable(self._simulator_summary),
+            "generated_at": _jsonable(datetime.now(timezone.utc)),
+        }
+
+    def setups_payload(self, query: dict[str, list[str]]) -> dict[str, Any]:
+        rows = self.service.journal_rows()
+        symbol = _first(query, "symbol")
+        side = _first(query, "side")
+        outcome = _first(query, "outcome")
+        try:
+            limit = int(_first(query, "limit") or "100")
+        except ValueError:
+            limit = 100
+        limit = max(1, min(500, limit))
+
+        if symbol:
+            rows = [row for row in rows if str(row.get("symbol", "")).upper() == symbol.upper()]
+        if side:
+            rows = [row for row in rows if str(row.get("side", "")).upper() == side.upper()]
+        if outcome:
+            rows = [row for row in rows if str(row.get("outcome", "")).upper() == outcome.upper()]
+        rows.sort(key=lambda row: str(row.get("closed_candle_at") or ""), reverse=True)
+        return {
+            "status": "ok",
+            "total": len(rows),
+            "setups": [_compact_setup_row(row) for row in rows[:limit]],
+            "generated_at": _jsonable(datetime.now(timezone.utc)),
+        }
+
+    def performance_payload(self) -> dict[str, Any]:
+        report = self.service.paper_setup_report()
+        return {
+            "status": "ok" if report is not None else "not_configured",
+            "message": (
+                None
+                if report is not None
+                else "Set BOT_PAPER_SETUP_JOURNAL_PATH to collect paper setup outcomes."
+            ),
+            "journal": _jsonable(report),
+            "portfolio": _jsonable(self.service.portfolio_state()),
+            "generated_at": _jsonable(datetime.now(timezone.utc)),
+        }
+
+    def portfolio_payload(self) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "portfolio": _jsonable(self.service.portfolio_state()),
+            "generated_at": _jsonable(datetime.now(timezone.utc)),
+        }
+
+    def drift_payload(self) -> dict[str, Any]:
+        report = self.service.paper_setup_report()
+        drift = report.drift if report is not None else None
+        return {
+            "status": "ok" if drift is not None else "not_configured",
+            "drift": _jsonable(drift),
             "generated_at": _jsonable(datetime.now(timezone.utc)),
         }
 
@@ -200,6 +283,8 @@ class WebStateService:
             or self._next_futures_refresh is None
             or self._next_news_refresh is None
             or self._next_simulator_refresh is None
+            or self._next_scalping_refresh is None
+            or self._next_active_trader_refresh is None
             or self._next_analysis is None
         ):
             return
@@ -216,19 +301,18 @@ class WebStateService:
                     technical,
                     evaluation.sentiment,
                     evaluation.macro,
-                    self.settings,
+                    self.service.signal_settings(),
                 )
-                scanner_result = self.service.refresh_scanner(
-                    evaluation.sentiment,
-                    evaluation.macro,
-                )
-                futures, trade_filter = self.service.build_futures_plan(
-                    signal,
-                    evaluation.market,
-                    probability_forecast=self.service.probability_forecast,
-                    market_context=self.service.market_context,
-                    shakeout=evaluation.shakeout,
-                    futures_metrics=evaluation.futures_metrics,
+                futures, trade_filter, portfolio, meta = (
+                    self.service.build_futures_plan(
+                        signal,
+                        evaluation.market,
+                        probability_forecast=self.service.probability_forecast,
+                        market_context=self.service.market_context,
+                        shakeout=evaluation.shakeout,
+                        futures_metrics=evaluation.futures_metrics,
+                        technical=technical,
+                    )
                 )
                 paper_setup = build_current_paper_setup(
                     futures=futures,
@@ -245,12 +329,14 @@ class WebStateService:
                     signal=signal,
                     futures=futures,
                     trade_filter=trade_filter,
+                    portfolio=portfolio,
+                    signal_profile=self.service.signal_profile(),
+                    meta=meta,
                     paper_setup=paper_setup,
                     price_range=self.service.price_range,
                     probability_forecast=self.service.probability_forecast,
                     scenario_forecast=self.service.scenario_forecast,
                     market_context=self.service.market_context,
-                    scanner=scanner_result,
                     evaluated_at=now,
                 )
                 self._next_analysis = next_analysis_boundary(
@@ -258,11 +344,43 @@ class WebStateService:
                 )
                 self.service.record_signal_evaluation(evaluation)
                 self.service.record_paper_setup(evaluation)
+                scanner_result = self.service.refresh_scanner(
+                    evaluation.sentiment,
+                    evaluation.macro,
+                )
+                evaluation = replace(evaluation, scanner=scanner_result)
             except Exception as exc:
                 evaluation = _with_error(
                     evaluation, f"Analysis refresh failed: {exc}"
                 )
                 self._next_analysis = now + timedelta(minutes=5)
+
+        if self.settings.scalping_enabled and now >= self._next_scalping_refresh:
+            try:
+                scalping = self.service.refresh_scalping()
+                evaluation = replace(evaluation, scalping=scalping)
+            except Exception as exc:
+                evaluation = _with_error(
+                    evaluation, f"Scalping refresh failed: {exc}"
+                )
+            self._next_scalping_refresh = now + timedelta(
+                seconds=self.settings.scalping_refresh_seconds
+            )
+
+        if (
+            self.settings.active_trader_enabled
+            and now >= self._next_active_trader_refresh
+        ):
+            try:
+                active_trader = self.service.refresh_active_trader()
+                evaluation = replace(evaluation, active_trader=active_trader)
+            except Exception as exc:
+                evaluation = _with_error(
+                    evaluation, f"Active trader refresh failed: {exc}"
+                )
+            self._next_active_trader_refresh = now + timedelta(
+                seconds=self.settings.active_trader_refresh_seconds
+            )
 
         if self.news_future is None and now >= self._next_news_refresh:
             self.news_future = self.news_executor.submit(
@@ -291,6 +409,7 @@ class WebStateService:
                     errors,
                     self.settings,
                     now,
+                    service=self.service,
                 )
             except Exception as exc:
                 evaluation = _with_error(
@@ -317,6 +436,8 @@ class WebStateService:
                     evaluation = replace(
                         evaluation,
                         market=market,
+                        active_trader=self.service.mark_active_trader(market)
+                        or evaluation.active_trader,
                         stream_status="REST fallback",
                         market_health=RefreshHealth(
                             status="REST",
@@ -362,7 +483,9 @@ class WebStateService:
                         attempted_at=now,
                     ),
                 )
-                evaluation = _apply_sentiment_context(evaluation, self.settings)
+                evaluation = _apply_sentiment_context(
+                    evaluation, self.settings, service=self.service
+                )
                 evaluation = _apply_current_trade_filters(evaluation, self.service)
             except Exception as exc:
                 evaluation = _with_error(
@@ -411,12 +534,25 @@ class WebRequestHandler(BaseHTTPRequestHandler):
     server: "WebServer"
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/api/health":
             self._send_json({"status": "ok"})
             return
         if path == "/api/snapshot":
             self._send_json(self.server.state.snapshot())
+            return
+        if path == "/api/setups":
+            self._send_json(self.server.state.setups_payload(parse_qs(parsed.query)))
+            return
+        if path == "/api/performance":
+            self._send_json(self.server.state.performance_payload())
+            return
+        if path == "/api/portfolio":
+            self._send_json(self.server.state.portfolio_payload())
+            return
+        if path == "/api/drift":
+            self._send_json(self.server.state.drift_payload())
             return
         if path == "/api/stream":
             self._send_stream()
@@ -811,6 +947,51 @@ def _factor(label: str, score: float) -> dict[str, Any]:
         "score": max(0.0, min(1.0, score)),
         "percent": round(max(0.0, min(1.0, score)) * 100.0, 1),
     }
+
+
+_COMPACT_SETUP_FIELDS = (
+    "symbol",
+    "timeframe",
+    "side",
+    "futures_action",
+    "entry",
+    "stop_loss",
+    "take_profit",
+    "reward_to_risk",
+    "close_price",
+    "technical_score",
+    "score_bucket",
+    "market_regime",
+    "volatility_regime",
+    "trend_range_context",
+    "quantity_btc",
+    "notional",
+    "max_loss",
+    "leverage",
+    "outcome",
+    "entry_reached",
+    "entry_reached_at",
+    "outcome_at",
+    "outcome_candle_at",
+    "outcome_price",
+    "r_multiple",
+    "duration_hours",
+    "closed_candle_at",
+    "signal_time",
+    "expires_at",
+)
+
+
+def _compact_setup_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {field: _jsonable(row.get(field)) for field in _COMPACT_SETUP_FIELDS}
+
+
+def _first(query: dict[str, list[str]], name: str) -> str | None:
+    values = query.get(name)
+    if not values:
+        return None
+    value = values[0].strip()
+    return value or None
 
 
 def _jsonable(value: Any) -> Any:

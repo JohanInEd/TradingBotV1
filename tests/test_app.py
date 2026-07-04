@@ -180,6 +180,12 @@ def test_shakeout_event_log_path_reads_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("BOT_PAPER_SETUP_HORIZON_HOURS", "48")
     monkeypatch.setenv("BOT_HISTORY_DB_PATH", "data/history.sqlite")
     monkeypatch.setenv("BOT_SYMBOLS", " BTC/USDT,eth/usdt,BTC/USDT, SOL/USDT ")
+    monkeypatch.setenv("BOT_ACTIVE_TRADER_REFRESH_SECONDS", "1")
+    monkeypatch.setenv("BOT_ACTIVE_TRADER_MARGIN_USD", "50")
+    monkeypatch.setenv("BOT_ACTIVE_TRADER_COOLDOWN_CANDLES", "5")
+    monkeypatch.setenv("BOT_ACTIVE_TRADER_EXECUTION", "binance_demo")
+    monkeypatch.setenv("BOT_BINANCE_DEMO_API_KEY", "demo-key")
+    monkeypatch.setenv("BOT_BINANCE_DEMO_API_SECRET", "demo-secret")
 
     settings = Settings.from_env()
 
@@ -197,6 +203,12 @@ def test_shakeout_event_log_path_reads_from_environment(monkeypatch) -> None:
     assert settings.history_db_path is not None
     assert settings.history_db_path.name == "history.sqlite"
     assert settings.scanner_symbols == ("BTC/USDT", "ETH/USDT", "SOL/USDT")
+    assert settings.active_trader_refresh_seconds == 1
+    assert settings.active_trader_margin_usd == 50
+    assert settings.active_trader_cooldown_candles == 5
+    assert settings.active_trader_execution == "binance_demo"
+    assert settings.binance_demo_api_key == "demo-key"
+    assert settings.binance_demo_api_secret == "demo-secret"
 
 
 def test_default_scanner_symbols_include_major_futures_universe(monkeypatch) -> None:

@@ -68,6 +68,7 @@ class PaperSetupStats:
 
 @dataclass(frozen=True, slots=True)
 class PaperLedgerTrade:
+    symbol: str
     side: str
     outcome: str
     entry_time: datetime | None
@@ -100,12 +101,27 @@ class PaperLedgerStats:
 
 
 @dataclass(frozen=True, slots=True)
+class DriftReport:
+    status: str
+    detail: str
+    recent_count: int
+    baseline_count: int
+    recent_win_rate: float | None = None
+    baseline_win_rate: float | None = None
+    win_rate_z: float | None = None
+    recent_expected_r: float | None = None
+    baseline_expected_r: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PaperSetupReport:
     total_setups: int
     overall: PaperSetupStats
     groups: dict[str, dict[str, PaperSetupStats]]
     ledger: PaperLedgerStats | None = None
     recent_trades: tuple[PaperLedgerTrade, ...] = ()
+    equity_curve: tuple[dict[str, Any], ...] = ()
+    drift: DriftReport | None = None
 
 
 class PaperSetupJournal:
@@ -313,6 +329,18 @@ class PaperSetupJournal:
                         resolved_count += 1
             self.connection.commit()
         return resolved_count
+
+    def count_open(self, *, exchange: str, symbol: str, timeframe: str) -> int:
+        with self._lock:
+            row = self.connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM paper_setups
+                WHERE exchange = ? AND symbol = ? AND timeframe = ? AND outcome = 'OPEN'
+                """,
+                (exchange, symbol, timeframe),
+            ).fetchone()
+        return int(row["count"]) if row is not None else 0
 
     def load_setups(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -654,6 +682,148 @@ def analyze_setup_rows(
         groups=groups,
         ledger=_ledger_stats(ledger_trades, settings=settings),
         recent_trades=tuple(ledger_trades[-12:]),
+        equity_curve=build_portfolio_equity_curve(ledger_trades, settings=settings),
+        drift=assess_performance_drift(rows),
+    )
+
+
+def build_portfolio_equity_curve(
+    trades: list[PaperLedgerTrade],
+    *,
+    settings: Settings,
+    limit: int = 240,
+) -> tuple[dict[str, Any], ...]:
+    """Replay closed paper trades across all symbols as one shared equity curve.
+
+    Each point also reports how many other paper positions were open when the
+    trade exited, which is what makes concurrent multi-symbol exposure visible.
+    """
+    intervals = [
+        (trade.entry_time, trade.exit_time)
+        for trade in trades
+        if trade.entry_time is not None
+    ]
+    points: list[dict[str, Any]] = [
+        {
+            "time": None,
+            "equity": settings.paper_account_equity,
+            "net_pnl": 0.0,
+            "outcome": "START",
+            "symbol": None,
+            "side": None,
+            "open_positions": 0,
+        }
+    ]
+    equity = settings.paper_account_equity
+    for trade in trades:
+        equity += trade.net_pnl
+        exit_time = trade.exit_time or trade.entry_time
+        concurrent = 0
+        if exit_time is not None:
+            concurrent = sum(
+                1
+                for entry, exit_ in intervals
+                if entry is not None
+                and entry <= exit_time
+                and (exit_ is None or exit_ >= exit_time)
+            )
+        points.append(
+            {
+                "time": _iso(exit_time) if exit_time is not None else None,
+                "equity": equity,
+                "net_pnl": trade.net_pnl,
+                "net_r": trade.net_r,
+                "outcome": trade.outcome,
+                "symbol": trade.symbol,
+                "side": trade.side,
+                "open_positions": concurrent,
+            }
+        )
+    return tuple(points[-limit:])
+
+
+def assess_performance_drift(
+    rows: list[dict[str, Any]],
+    *,
+    recent_count: int = 20,
+    min_baseline: int = 30,
+) -> DriftReport | None:
+    """Compare recent resolved-setup performance against the long-run baseline.
+
+    Uses a one-sided binomial z-score on TP-vs-SL win rate: negative drift
+    (recent worse than baseline) raises WARNING at z <= -1.5 and ALERT at
+    z <= -2.5. EXPIRED outcomes are excluded because they carry no TP/SL
+    information.
+    """
+    resolved = [
+        row
+        for row in rows
+        if row.get("outcome") in {OUTCOME_TP, OUTCOME_SL}
+    ]
+    resolved.sort(key=lambda row: str(row.get("outcome_at") or ""))
+    if len(resolved) < min_baseline + max(5, recent_count // 2):
+        return DriftReport(
+            status="INSUFFICIENT DATA",
+            detail=(
+                f"{len(resolved)} resolved TP/SL setups; need at least "
+                f"{min_baseline + max(5, recent_count // 2)} for drift analysis."
+            ),
+            recent_count=len(resolved),
+            baseline_count=0,
+        )
+
+    recent = resolved[-recent_count:]
+    baseline = resolved[: len(resolved) - len(recent)]
+    recent_wins = sum(1 for row in recent if row.get("outcome") == OUTCOME_TP)
+    baseline_wins = sum(1 for row in baseline if row.get("outcome") == OUTCOME_TP)
+    recent_rate = recent_wins / len(recent)
+    baseline_rate = baseline_wins / len(baseline)
+    variance = baseline_rate * (1.0 - baseline_rate) / len(recent)
+    z_score = (
+        (recent_rate - baseline_rate) / math.sqrt(variance)
+        if variance > 0
+        else 0.0
+    )
+
+    def _mean_r(items: list[dict[str, Any]]) -> float | None:
+        values = [
+            value
+            for value in (_finite_or_none(row.get("r_multiple")) for row in items)
+            if value is not None
+        ]
+        return sum(values) / len(values) if values else None
+
+    if z_score <= -2.5:
+        status = "ALERT"
+        detail = (
+            f"Recent win rate {recent_rate:.0%} is far below the "
+            f"{baseline_rate:.0%} baseline (z={z_score:+.2f}). Live edge may "
+            "have degraded; review before trusting new signals."
+        )
+    elif z_score <= -1.5:
+        status = "WARNING"
+        detail = (
+            f"Recent win rate {recent_rate:.0%} is below the "
+            f"{baseline_rate:.0%} baseline (z={z_score:+.2f}). Watch the next "
+            "setups closely."
+        )
+    else:
+        status = "NORMAL"
+        detail = (
+            f"Recent win rate {recent_rate:.0%} vs baseline "
+            f"{baseline_rate:.0%} (z={z_score:+.2f}) is within expected "
+            "variation."
+        )
+    return DriftReport(
+        status=status,
+        detail=detail,
+        recent_count=len(recent),
+        baseline_count=len(baseline),
+        recent_win_rate=recent_rate,
+        baseline_win_rate=baseline_rate,
+        win_rate_z=z_score,
+        recent_expected_r=_mean_r(recent),
+        baseline_expected_r=_mean_r(baseline),
     )
 
 
@@ -692,6 +862,7 @@ def build_paper_ledger_trades(
         net_pnl = gross_pnl - fees - slippage - funding
         trades.append(
             PaperLedgerTrade(
+                symbol=str(row.get("symbol") or "?"),
                 side=str(row.get("side") or "UNKNOWN"),
                 outcome=str(row.get("outcome") or "UNKNOWN"),
                 entry_time=_parse_datetime_or_none(row.get("signal_time")),

@@ -13,6 +13,8 @@ from typing import Any
 from rich.console import Console
 from rich.live import Live
 
+from btc_trading_bot.active_trader import ACTIVE_TRADER_TIMEFRAME, ActiveTrader
+from btc_trading_bot.adaptive import resolve_signal_profile
 from btc_trading_bot.backtest import (
     ProbabilityBacktestError,
     ProbabilityBacktestSettings,
@@ -33,12 +35,19 @@ from btc_trading_bot.indicators import (
     build_chart_indicators,
 )
 from btc_trading_bot.market_context import analyze_market_context
+from btc_trading_bot.meta_model import MetaModel, assess_meta_model, train_meta_model
 from btc_trading_bot.models import (
+    ActiveTraderSnapshot,
     Evaluation,
     FuturesMetrics,
+    FuturesRecommendation,
     MacroAnalysis,
     MarketSnapshot,
+    MetaModelAssessment,
+    PortfolioDecision,
+    PortfolioState,
     RefreshHealth,
+    ScalpingEvaluation,
     SentimentAnalysis,
     TechnicalAnalysis,
 )
@@ -56,16 +65,28 @@ from btc_trading_bot.paper_setups import (
     analyze_setup_rows,
     build_current_paper_setup,
 )
+from btc_trading_bot.portfolio import (
+    build_portfolio_state,
+    check_portfolio_entry,
+    empty_portfolio_state,
+)
 from btc_trading_bot.price_range import PriceRangeSettings, forecast_price_range
 from btc_trading_bot.realtime import RealtimeMarketStream, StreamEvent
 from btc_trading_bot.risk_filters import apply_do_not_trade_filters
+from btc_trading_bot.scalping import (
+    SCALPING_TIMEFRAME,
+    evaluate_scalping,
+    finalize_execution_cycle,
+    scalping_settings,
+    to_journal_evaluation,
+)
 from btc_trading_bot.scenario_map import ScenarioMapSettings, forecast_scenario_map
 from btc_trading_bot.scanner import MarketScanner
 from btc_trading_bot.signal_journal import SignalJournalRecorder
 from btc_trading_bot.strategy import calculate_signal
 
 LOGGER = logging.getLogger(__name__)
-TRADE_MODE_TIMEFRAMES = ("4h", "1h", "30m")
+TRADE_MODE_TIMEFRAMES = ("4h", "1h", "30m", "5m")
 
 
 class BotService:
@@ -73,7 +94,6 @@ class BotService:
         self.settings = settings
         self.exchange = ExchangeClient(settings)
         self.news = NewsAnalyzer(settings)
-        self.scanner = MarketScanner(settings)
         self._live_candles: dict[str, Any] = {}
         self._price_range = None
         self._probability_forecast = None
@@ -99,8 +119,33 @@ class BotService:
             if settings.paper_setup_journal_path is not None
             else None
         )
+        self.scanner = MarketScanner(settings, journal=self._paper_setup_journal)
         self._paper_setup_report: PaperSetupReport | None = None
+        self._portfolio_state: PortfolioState = empty_portfolio_state(settings)
+        self._meta_model: MetaModel | None = None
+        self._signal_settings, self._signal_profile = resolve_signal_profile(
+            settings, None
+        )
         self._refresh_paper_setup_report()
+        self._scalping_journal = (
+            PaperSetupJournal(
+                settings.scalping_journal_path,
+                horizon_hours=settings.scalping_horizon_hours,
+            )
+            if settings.scalping_enabled and settings.scalping_journal_path is not None
+            else None
+        )
+        self._scalping_report: PaperSetupReport | None = None
+        self._refresh_scalping_report()
+        self._active_trader = (
+            ActiveTrader(settings) if settings.active_trader_enabled else None
+        )
+
+    def signal_settings(self) -> Settings:
+        return self._signal_settings
+
+    def signal_profile(self):
+        return self._signal_profile
 
     def evaluate(self, market: MarketSnapshot | None = None) -> Evaluation:
         errors: list[str] = []
@@ -121,15 +166,15 @@ class BotService:
         )
         sentiment = blend_derivatives_crowding(sentiment, futures_metrics)
         evaluated_at = datetime.now(timezone.utc)
-        signal = calculate_signal(technical, sentiment, macro, self.settings)
-        scanner_result = self.refresh_scanner(sentiment, macro)
-        futures, trade_filter = self.build_futures_plan(
+        signal = calculate_signal(technical, sentiment, macro, self.signal_settings())
+        futures, trade_filter, portfolio, meta = self.build_futures_plan(
             signal,
             market,
             probability_forecast=self._probability_forecast,
             market_context=self._market_context,
             shakeout=shakeout,
             futures_metrics=futures_metrics,
+            technical=technical,
         )
         paper_setup = build_current_paper_setup(
             futures=futures,
@@ -177,11 +222,16 @@ class BotService:
                 errors=news_errors,
                 attempted_at=evaluated_at,
             ),
-            scanner=scanner_result,
+            portfolio=portfolio,
+            signal_profile=self.signal_profile(),
+            meta=meta,
         )
         self.record_signal_evaluation(evaluation)
         self.record_paper_setup(evaluation)
-        return evaluation
+        # The scanner allocates the remaining portfolio budget after the
+        # primary setup has been recorded.
+        scanner_result = self.refresh_scanner(sentiment, macro)
+        return replace(evaluation, scanner=scanner_result)
 
     def refresh_technicals(self) -> TechnicalAnalysis:
         four_hour_candles = self.exchange.fetch_closed_candles(
@@ -276,19 +326,23 @@ class BotService:
                 }
                 continue
 
+            mode_settings, mode_profile = resolve_signal_profile(
+                self.settings, context.get("market_context")
+            )
             signal = calculate_signal(
                 technical,
                 evaluation.sentiment,
                 evaluation.macro,
-                self.settings,
+                mode_settings,
             )
-            futures, trade_filter = self.build_futures_plan(
+            futures, trade_filter, portfolio, meta = self.build_futures_plan(
                 signal,
                 evaluation.market,
                 probability_forecast=context.get("probability_forecast"),
                 market_context=context.get("market_context"),
                 shakeout=evaluation.shakeout,
                 futures_metrics=evaluation.futures_metrics,
+                technical=technical,
             )
             paper_setup = build_current_paper_setup(
                 futures=futures,
@@ -308,8 +362,11 @@ class BotService:
                 },
                 "technical": technical,
                 "signal": signal,
+                "signal_profile": mode_profile,
                 "futures": futures,
                 "trade_filter": trade_filter,
+                "portfolio": portfolio,
+                "meta": meta,
                 "paper_setup": paper_setup,
                 "price_range": context.get("price_range"),
                 "probability_forecast": context.get("probability_forecast"),
@@ -334,9 +391,10 @@ class BotService:
         market_context=None,
         shakeout=None,
         futures_metrics=None,
+        technical=None,
     ):
         futures = build_futures_recommendation(signal, market, self.settings)
-        return apply_do_not_trade_filters(
+        futures, trade_filter = apply_do_not_trade_filters(
             futures,
             self.settings,
             probability_forecast=probability_forecast,
@@ -344,6 +402,43 @@ class BotService:
             shakeout=shakeout,
             futures_metrics=futures_metrics,
         )
+        meta: MetaModelAssessment | None = None
+        if futures.side in {"LONG", "SHORT"}:
+            meta = assess_meta_model(
+                self._meta_model,
+                settings=self.settings,
+                side=futures.side,
+                technical=technical,
+                market_context=market_context,
+                probability_forecast=probability_forecast,
+            )
+            if meta.status == "BLOCKED":
+                futures = _flatten_futures(
+                    futures,
+                    f"Meta model blocked {futures.action}: {meta.detail}",
+                )
+        portfolio: PortfolioDecision | None = None
+        if futures.side in {"LONG", "SHORT"}:
+            portfolio = check_portfolio_entry(
+                self.portfolio_state(),
+                symbol=self.exchange.symbol,
+                side=futures.side,
+                max_loss=futures.max_loss,
+                settings=self.settings,
+                candle_time=(
+                    technical.candle_time if technical is not None else None
+                ),
+            )
+            if not portfolio.allowed:
+                futures = _flatten_futures(
+                    futures,
+                    f"Portfolio limits blocked {futures.action}: "
+                    + " ".join(portfolio.reasons),
+                )
+        return futures, trade_filter, portfolio, meta
+
+    def portfolio_state(self) -> PortfolioState:
+        return self._portfolio_state
 
     def paper_setup_report(self) -> PaperSetupReport | None:
         return self._paper_setup_report
@@ -357,11 +452,11 @@ class BotService:
         self._live_candles[timeframe] = merge_candle_update(
             candles, row, self.settings.candle_limit
         )
-        technical = self._analyze_candles(self._live_candles)
         if timeframe == self.settings.timeframe:
             self._market_context = analyze_market_context(
                 self._live_candles[timeframe]
             )
+        technical = self._analyze_candles(self._live_candles)
         if timeframe in TRADE_MODE_TIMEFRAMES:
             self._trade_mode_contexts[timeframe] = self._build_trade_mode_context(
                 timeframe,
@@ -372,13 +467,16 @@ class BotService:
     def _analyze_candles(
         self, candles: dict[str, Any]
     ) -> TechnicalAnalysis:
+        self._signal_settings, self._signal_profile = resolve_signal_profile(
+            self.settings, self._market_context
+        )
         return analyze_multi_timeframe(
             candles[self.settings.timeframe],
             candles[self.settings.daily_timeframe],
             candles[self.settings.entry_timeframe],
-            primary_weight=self.settings.primary_timeframe_weight,
-            daily_weight=self.settings.daily_timeframe_weight,
-            hourly_weight=self.settings.entry_timeframe_weight,
+            primary_weight=self._signal_settings.primary_timeframe_weight,
+            daily_weight=self._signal_settings.daily_timeframe_weight,
+            hourly_weight=self._signal_settings.entry_timeframe_weight,
         )
 
     def _refresh_trade_mode_contexts(self) -> None:
@@ -453,7 +551,7 @@ class BotService:
             LOGGER.warning("%s probability backtest unavailable: %s", timeframe, exc)
             context["probability_forecast"] = None
 
-        scenario_horizon_hours = 168
+        scenario_horizon_hours = 1 if timeframe == "5m" else 168
         scenario_horizon = _horizon_candles(scenario_horizon_hours, timeframe)
         try:
             scenario = forecast_scenario_map(
@@ -520,7 +618,16 @@ class BotService:
         sentiment: SentimentAnalysis,
         macro: MacroAnalysis,
     ):
-        return self.scanner.scan(sentiment, macro)
+        result = self.scanner.scan(
+            sentiment,
+            macro,
+            portfolio_state=self.portfolio_state(),
+            primary_symbol=self.exchange.symbol,
+        )
+        if self._paper_setup_journal is not None:
+            # Scanner scans may have recorded or resolved setups.
+            self._refresh_paper_setup_report()
+        return result
 
     def refresh_futures_metrics(
         self,
@@ -581,6 +688,10 @@ class BotService:
     def record_paper_setup(self, evaluation: Evaluation) -> None:
         if self._paper_setup_journal is None:
             return
+        if evaluation.portfolio is not None and evaluation.portfolio.status == "TRACKED":
+            # This closed-candle setup is already the tracked open position;
+            # re-recording would create a near-duplicate row.
+            return
         try:
             self._paper_setup_journal.record(
                 evaluation,
@@ -611,18 +722,174 @@ class BotService:
         if self._paper_setup_journal is None:
             return
         try:
+            rows = self._paper_setup_journal.load_setups()
             self._paper_setup_report = analyze_setup_rows(
-                self._paper_setup_journal.load_setups(),
+                rows,
                 settings=self.settings,
             )
+            self._portfolio_state = build_portfolio_state(
+                rows, settings=self.settings
+            )
+            if self.settings.meta_model_enabled:
+                self._meta_model = train_meta_model(
+                    rows,
+                    min_samples=self.settings.meta_min_training_samples,
+                )
         except Exception as exc:
             LOGGER.warning("Paper setup report refresh failed: %s", exc)
 
+    def journal_rows(self) -> list[dict[str, Any]]:
+        if self._paper_setup_journal is None:
+            return []
+        try:
+            return self._paper_setup_journal.load_setups()
+        except Exception as exc:
+            LOGGER.warning("Paper setup journal read failed: %s", exc)
+            return []
+
+    def refresh_scalping(self) -> ScalpingEvaluation | None:
+        """Evaluate the closed-5m-candle scalping signal independently of the
+        primary 4h-anchored signal, and journal it separately so it never
+        shares portfolio limits or meta-model training with the main system.
+        """
+        if not self.settings.scalping_enabled:
+            return None
+        candles = self.exchange.fetch_closed_candles(SCALPING_TIMEFRAME)
+        market = self.exchange.fetch_market_snapshot()
+        shakeout = self.shakeout.analyze(datetime.now(timezone.utc))
+        result = evaluate_scalping(candles, market, self.settings, shakeout=shakeout)
+
+        if result.futures.side in {"LONG", "SHORT"}:
+            fill_detail = (
+                f"Paper-filled {result.paper_setup.side} at "
+                f"${result.paper_setup.entry_price:,.2f}."
+                if result.paper_setup is not None
+                else "Paper setup filled."
+            )
+            if self._scalping_journal is not None:
+                try:
+                    self._scalping_journal.resolve_with_candles(
+                        candles,
+                        exchange=self.exchange.id,
+                        symbol=self.exchange.symbol,
+                        timeframe=SCALPING_TIMEFRAME,
+                    )
+                except Exception as exc:
+                    LOGGER.warning("Scalping outcome resolution failed: %s", exc)
+
+                if self._has_open_scalp():
+                    already_open = "A scalp paper setup for this symbol is already open."
+                    result = replace(
+                        result,
+                        futures=_flatten_futures(result.futures, already_open),
+                        paper_setup=None,
+                        execution_cycle=finalize_execution_cycle(
+                            result.execution_cycle, filled=False, detail=already_open
+                        ),
+                    )
+                else:
+                    try:
+                        evaluation = to_journal_evaluation(result, market)
+                        self._scalping_journal.record(
+                            evaluation,
+                            exchange=self.exchange.id,
+                            symbol=self.exchange.symbol,
+                            timeframe=SCALPING_TIMEFRAME,
+                            settings=scalping_settings(self.settings),
+                        )
+                        result = replace(
+                            result,
+                            execution_cycle=finalize_execution_cycle(
+                                result.execution_cycle, filled=True, detail=fill_detail
+                            ),
+                        )
+                    except Exception as exc:
+                        LOGGER.warning("Scalping journal write failed: %s", exc)
+                self._refresh_scalping_report()
+            else:
+                result = replace(
+                    result,
+                    execution_cycle=finalize_execution_cycle(
+                        result.execution_cycle, filled=True, detail=fill_detail
+                    ),
+                )
+
+        return result
+
+    def scalping_report(self) -> PaperSetupReport | None:
+        return self._scalping_report
+
+    def refresh_active_trader(self) -> ActiveTraderSnapshot | None:
+        """Advance the always-on $100 active trader by one 5-minute cycle.
+
+        Independent of the scalping journal: it holds one paper position at a
+        time, compounds a single balance, and reports realized PnL growth.
+        """
+        if self._active_trader is None:
+            return None
+        candles = self.exchange.fetch_closed_candles(ACTIVE_TRADER_TIMEFRAME)
+        market = self.exchange.fetch_market_snapshot()
+        shakeout = self.shakeout.analyze(datetime.now(timezone.utc))
+        return self._active_trader.tick(candles, market, shakeout=shakeout)
+
+    def mark_active_trader(self, market: MarketSnapshot) -> ActiveTraderSnapshot | None:
+        """Refresh active-trader open PnL from the latest market price only."""
+        if self._active_trader is None:
+            return None
+        return self._active_trader.mark_to_market(market)
+
+    def _has_open_scalp(self) -> bool:
+        if self._scalping_journal is None:
+            return False
+        try:
+            return (
+                self._scalping_journal.count_open(
+                    exchange=self.exchange.id,
+                    symbol=self.exchange.symbol,
+                    timeframe=SCALPING_TIMEFRAME,
+                )
+                > 0
+            )
+        except Exception as exc:
+            LOGGER.warning("Scalping open-position check failed: %s", exc)
+            return False
+
+    def _refresh_scalping_report(self) -> None:
+        if self._scalping_journal is None:
+            return
+        try:
+            rows = self._scalping_journal.load_setups()
+            self._scalping_report = analyze_setup_rows(
+                rows, settings=scalping_settings(self.settings)
+            )
+        except Exception as exc:
+            LOGGER.warning("Scalping report refresh failed: %s", exc)
+
     def close(self) -> None:
         self.news.close()
+        self.scanner.close()
         if self._paper_setup_journal is not None:
             self._paper_setup_journal.close()
+        if self._scalping_journal is not None:
+            self._scalping_journal.close()
         self.exchange.close()
+
+
+def _flatten_futures(
+    futures: FuturesRecommendation, reason: str
+) -> FuturesRecommendation:
+    return replace(
+        futures,
+        action="STAY FLAT",
+        side="FLAT",
+        entry_price=None,
+        stop_loss=None,
+        take_profit=None,
+        quantity_btc=0.0,
+        notional=0.0,
+        max_loss=0.0,
+        reason=reason,
+    )
 
 
 def next_analysis_boundary(now: datetime, interval_hours: int) -> datetime:
@@ -656,6 +923,8 @@ def _timeframe_hours(timeframe: str) -> float:
 def _timeframe_label(timeframe: str) -> str:
     if timeframe == "30m":
         return "30min Trade"
+    if timeframe == "5m":
+        return "5min Trade"
     return f"{timeframe} Trade"
 
 
@@ -748,6 +1017,8 @@ def run(settings: Settings, once: bool = False) -> int:
     next_news_refresh = datetime.now(timezone.utc) + timedelta(
         seconds=settings.news_refresh_seconds
     )
+    next_scalping_refresh = datetime.now(timezone.utc)
+    next_active_trader_refresh = datetime.now(timezone.utc)
     next_analysis = evaluation.next_analysis_at
     evaluation = replace(
         evaluation,
@@ -789,19 +1060,18 @@ def run(settings: Settings, once: bool = False) -> int:
                             technical,
                             evaluation.sentiment,
                             evaluation.macro,
-                            settings,
+                            service.signal_settings(),
                         )
-                        scanner_result = service.refresh_scanner(
-                            evaluation.sentiment,
-                            evaluation.macro,
-                        )
-                        futures, trade_filter = service.build_futures_plan(
-                            signal,
-                            evaluation.market,
-                            probability_forecast=service.probability_forecast,
-                            market_context=service.market_context,
-                            shakeout=evaluation.shakeout,
-                            futures_metrics=evaluation.futures_metrics,
+                        futures, trade_filter, portfolio, meta = (
+                            service.build_futures_plan(
+                                signal,
+                                evaluation.market,
+                                probability_forecast=service.probability_forecast,
+                                market_context=service.market_context,
+                                shakeout=evaluation.shakeout,
+                                futures_metrics=evaluation.futures_metrics,
+                                technical=technical,
+                            )
                         )
                         paper_setup = build_current_paper_setup(
                             futures=futures,
@@ -818,12 +1088,14 @@ def run(settings: Settings, once: bool = False) -> int:
                             signal=signal,
                             futures=futures,
                             trade_filter=trade_filter,
+                            portfolio=portfolio,
+                            signal_profile=service.signal_profile(),
+                            meta=meta,
                             paper_setup=paper_setup,
                             price_range=service.price_range,
                             probability_forecast=service.probability_forecast,
                             scenario_forecast=service.scenario_forecast,
                             market_context=service.market_context,
-                            scanner=scanner_result,
                             evaluated_at=now,
                         )
                         next_analysis = next_analysis_boundary(
@@ -831,11 +1103,40 @@ def run(settings: Settings, once: bool = False) -> int:
                         )
                         service.record_signal_evaluation(evaluation)
                         service.record_paper_setup(evaluation)
+                        scanner_result = service.refresh_scanner(
+                            evaluation.sentiment,
+                            evaluation.macro,
+                        )
+                        evaluation = replace(evaluation, scanner=scanner_result)
                     except Exception as exc:
                         evaluation = _with_error(
                             evaluation, f"Analysis refresh failed: {exc}"
                         )
                         next_analysis = now + timedelta(minutes=5)
+
+                if settings.scalping_enabled and now >= next_scalping_refresh:
+                    try:
+                        scalping = service.refresh_scalping()
+                        evaluation = replace(evaluation, scalping=scalping)
+                    except Exception as exc:
+                        evaluation = _with_error(
+                            evaluation, f"Scalping refresh failed: {exc}"
+                        )
+                    next_scalping_refresh = now + timedelta(
+                        seconds=settings.scalping_refresh_seconds
+                    )
+
+                if settings.active_trader_enabled and now >= next_active_trader_refresh:
+                    try:
+                        active_trader = service.refresh_active_trader()
+                        evaluation = replace(evaluation, active_trader=active_trader)
+                    except Exception as exc:
+                        evaluation = _with_error(
+                            evaluation, f"Active trader refresh failed: {exc}"
+                        )
+                    next_active_trader_refresh = now + timedelta(
+                        seconds=settings.active_trader_refresh_seconds
+                    )
 
                 if news_future is None and now >= next_news_refresh:
                     news_future = news_executor.submit(service.refresh_news)
@@ -862,6 +1163,7 @@ def run(settings: Settings, once: bool = False) -> int:
                             errors,
                             settings,
                             now,
+                            service=service,
                         )
                     except Exception as exc:
                         evaluation = _with_error(
@@ -888,6 +1190,8 @@ def run(settings: Settings, once: bool = False) -> int:
                             evaluation = replace(
                                 evaluation,
                                 market=market,
+                                active_trader=service.mark_active_trader(market)
+                                or evaluation.active_trader,
                                 stream_status="REST fallback",
                                 market_health=RefreshHealth(
                                     status="REST",
@@ -938,7 +1242,9 @@ def run(settings: Settings, once: bool = False) -> int:
                                 attempted_at=now,
                             ),
                         )
-                        evaluation = _apply_sentiment_context(evaluation, settings)
+                        evaluation = _apply_sentiment_context(
+                            evaluation, settings, service=service
+                        )
                         evaluation = _apply_current_trade_filters(evaluation, service)
                     except Exception as exc:
                         evaluation = _with_error(
@@ -1014,6 +1320,8 @@ def _apply_stream_events(
                 current = replace(
                     current,
                     market=market,
+                    active_trader=service.mark_active_trader(market)
+                    or current.active_trader,
                     stream_status="LIVE",
                     stream_updated_at=event.received_at,
                     market_health=replace(
@@ -1089,13 +1397,14 @@ def _apply_current_trade_filters(
     evaluation: Evaluation,
     service: BotService,
 ) -> Evaluation:
-    futures, trade_filter = service.build_futures_plan(
+    futures, trade_filter, portfolio, meta = service.build_futures_plan(
         evaluation.signal,
         evaluation.market,
         probability_forecast=evaluation.probability_forecast,
         market_context=evaluation.market_context,
         shakeout=evaluation.shakeout,
         futures_metrics=evaluation.futures_metrics,
+        technical=evaluation.technical,
     )
     paper_setup = build_current_paper_setup(
         futures=futures,
@@ -1109,6 +1418,8 @@ def _apply_current_trade_filters(
         evaluation,
         futures=futures,
         trade_filter=trade_filter,
+        portfolio=portfolio,
+        meta=meta,
         paper_setup=paper_setup,
     )
 
@@ -1116,6 +1427,7 @@ def _apply_current_trade_filters(
 def _apply_sentiment_context(
     evaluation: Evaluation,
     settings: Settings,
+    service: BotService | None = None,
 ) -> Evaluation:
     sentiment = blend_derivatives_crowding(
         evaluation.sentiment,
@@ -1123,7 +1435,10 @@ def _apply_sentiment_context(
     )
     if sentiment == evaluation.sentiment:
         return evaluation
-    signal = calculate_signal(evaluation.technical, sentiment, evaluation.macro, settings)
+    signal_settings = service.signal_settings() if service is not None else settings
+    signal = calculate_signal(
+        evaluation.technical, sentiment, evaluation.macro, signal_settings
+    )
     return replace(evaluation, sentiment=sentiment, signal=signal)
 
 
@@ -1134,6 +1449,7 @@ def _apply_news_refresh(
     errors: tuple[str, ...],
     settings: Settings,
     updated_at: datetime,
+    service: BotService | None = None,
 ) -> Evaluation:
     current = evaluation
     for error in errors:
@@ -1150,15 +1466,29 @@ def _apply_news_refresh(
         )
 
     sentiment = blend_derivatives_crowding(sentiment, current.futures_metrics)
-    signal = calculate_signal(current.technical, sentiment, macro, settings)
-    futures, trade_filter = apply_do_not_trade_filters(
-        build_futures_recommendation(signal, current.market, settings),
-        settings,
-        probability_forecast=current.probability_forecast,
-        market_context=current.market_context,
-        shakeout=current.shakeout,
-        futures_metrics=current.futures_metrics,
-    )
+    signal_settings = service.signal_settings() if service is not None else settings
+    signal = calculate_signal(current.technical, sentiment, macro, signal_settings)
+    portfolio = current.portfolio
+    meta = current.meta
+    if service is not None:
+        futures, trade_filter, portfolio, meta = service.build_futures_plan(
+            signal,
+            current.market,
+            probability_forecast=current.probability_forecast,
+            market_context=current.market_context,
+            shakeout=current.shakeout,
+            futures_metrics=current.futures_metrics,
+            technical=current.technical,
+        )
+    else:
+        futures, trade_filter = apply_do_not_trade_filters(
+            build_futures_recommendation(signal, current.market, settings),
+            settings,
+            probability_forecast=current.probability_forecast,
+            market_context=current.market_context,
+            shakeout=current.shakeout,
+            futures_metrics=current.futures_metrics,
+        )
     paper_setup = build_current_paper_setup(
         futures=futures,
         technical=current.technical,
@@ -1174,6 +1504,8 @@ def _apply_news_refresh(
         signal=signal,
         futures=futures,
         trade_filter=trade_filter,
+        portfolio=portfolio,
+        meta=meta,
         paper_setup=paper_setup,
         evaluated_at=updated_at,
         news_updated_at=updated_at,
